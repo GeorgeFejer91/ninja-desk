@@ -18,7 +18,7 @@ Ninja Desk gives one owner live view, mouse control, and two-way text clipboard 
 - Preserve Tauri identifier `dev.local.vdoninjaremote` through migration so existing Windows DPAPI app data remains accessible.
 - One controller, ordinary signed-in Windows or Linux X11 desktop, primary display, text clipboard. See `DESIGN.md`.
 - One in-memory 24-hour invitation at a time; it opens the same public companion directly and is invalidated by expiry, local revoke, replacement, Stop, password replacement, or app restart. The main generated password remains available separately.
-- The browser companion's connected viewer fills the viewport and offers fullscreen/immersive viewing, fit/original-size zoom, and Mouse/Touch gestures. Automatic capture targets up to 30 fps with newest-frame delivery. An optional local screen-share gesture sends a display track directly through WebRTC, requesting at most 720p/60 fps; its runtime performance and end-to-end latency are unmeasured.
+- The browser companion's connected viewer fills the viewport and offers fullscreen/immersive viewing, fit/original-size zoom, and Mouse/Touch gestures. Automatic capture targets up to 30 fps with newest-frame delivery. An optional local screen-share gesture sends a display track directly through WebRTC, requesting at most 720p/60 fps. A local Low data toggle limits the requested video bitrate and capture rate, with still-frame suppression in the automatic path. Runtime performance, data usage, and end-to-end latency are unmeasured.
 - A successful build does not prove Windows app-to-app, Linux X11, phone, cross-network, or end-to-end runtime behavior.
 - The earlier host and companion repositories are migration sources; this repository owns ongoing product work.
 

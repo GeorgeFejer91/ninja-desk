@@ -156,6 +156,11 @@ fn set_screen_capture_paused(frames: State<'_, screen::FrameStore>, paused: bool
 }
 
 #[tauri::command]
+fn set_low_data_mode(frames: State<'_, screen::FrameStore>, enabled: bool) {
+    frames.set_low_data(enabled);
+}
+
+#[tauri::command]
 fn disconnect(authority: State<'_, Authority>, peer: String) {
     authority.disconnect(&peer);
 }
@@ -206,6 +211,7 @@ pub fn run() {
             active_peer,
             read_frame,
             set_screen_capture_paused,
+            set_low_data_mode,
             disconnect,
             stop,
             replace_password,

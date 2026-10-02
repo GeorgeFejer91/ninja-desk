@@ -156,6 +156,14 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
             app.state::<FrameStore>().set_paused(paused);
             Ok(Value::Null)
         }
+        "set_low_data_mode" => {
+            let enabled = args
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("invalid_capture")?;
+            app.state::<FrameStore>().set_low_data(enabled);
+            Ok(Value::Null)
+        }
         "disconnect" => {
             let peer = args
                 .get("peer")

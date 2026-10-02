@@ -17,6 +17,7 @@ const revealButton = document.querySelector<HTMLButtonElement>("#reveal")!;
 const copyButton = document.querySelector<HTMLButtonElement>("#copy")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
 const fastCaptureButton = document.querySelector<HTMLButtonElement>("#fast-capture")!;
+const lowDataButton = document.querySelector<HTMLButtonElement>("#low-data")!;
 const replacePasswordButton = document.querySelector<HTMLButtonElement>("#replace-password")!;
 const controlButton = document.querySelector<HTMLButtonElement>("#control")!;
 const openHostButton = document.querySelector<HTMLButtonElement>("#open-host")!;
@@ -46,6 +47,7 @@ let mediaSdk: VDONinja | null = null;
 let mediaTrack: CanvasCaptureMediaStreamTrack | null = null;
 let publishedTrack: MediaStreamTrack | null = null;
 let fastCapture: MediaStream | null = null;
+let lowData = false;
 let activePeer: string | null = null;
 let activeTransport: VDONinja | null = null;
 let currentInvite: Pick<AccessLink, "id" | "expiresAtMs"> | null = null;
@@ -53,6 +55,7 @@ let stopped = false;
 let startupStage = "bootstrap";
 let incomingQueue: Promise<void> = Promise.resolve();
 let incomingPending = 0;
+const LOW_DATA_MEDIA = { video: { maxBitrate: 350_000 } };
 
 function safeError(error: unknown): string {
   return String(error).replace(/[0-9a-f]{32,64}/gi, "[redacted]").slice(0, 160);
@@ -88,6 +91,39 @@ function canvasStream() {
   return { stream, track };
 }
 
+function displayConstraints(): MediaTrackConstraints {
+  return lowData
+    ? { width: { max: 960 }, height: { max: 540 }, frameRate: { ideal: 10, max: 10 } }
+    : { width: { max: 1280 }, height: { max: 720 }, frameRate: { ideal: 60, max: 60 } };
+}
+
+lowDataButton.addEventListener("click", async () => {
+  if (stopped) return;
+  lowDataButton.disabled = true;
+  try {
+    const enabled = !lowData;
+    await invoke("set_low_data_mode", { enabled });
+    lowData = enabled;
+    lowDataButton.textContent = `Low data mode: ${enabled ? "On" : "Off"}`;
+    lowDataButton.setAttribute("aria-pressed", String(enabled));
+    let limitsApplied = true;
+    if (mediaSdk) {
+      try { await mediaSdk.updatePublisherMedia(enabled ? { media: LOW_DATA_MEDIA } : { clear: true }); }
+      catch { limitsApplied = false; }
+    }
+    const track = fastCapture?.getVideoTracks()[0];
+    if (track?.readyState === "live") {
+      try { await track.applyConstraints(displayConstraints()); }
+      catch { limitsApplied = false; }
+    }
+    setStatus(limitsApplied ? (enabled ? "Low data mode on" : "Low data mode off") : "Mode changed; browser stream limits may be unavailable");
+  } catch (error) {
+    setStatus(`Stream limits may be unavailable: ${safeError(error)}`);
+  } finally {
+    lowDataButton.disabled = stopped;
+  }
+});
+
 function stopFastCapture() {
   const stream = fastCapture;
   fastCapture = null;
@@ -109,7 +145,7 @@ fastCaptureButton.addEventListener("click", async () => {
       throw new Error("Select the primary display, not a window or tab");
     }
     track.contentHint = "motion";
-    await track.applyConstraints({ width: { max: 1280 }, height: { max: 720 }, frameRate: { ideal: 60, max: 60 } }).catch(() => {});
+    await track.applyConstraints(displayConstraints()).catch(() => {});
     if (activePeer || stopped) {
       stream.getTracks().forEach((item) => item.stop());
       throw new Error("Enable fast capture before the controller connects");
@@ -208,7 +244,11 @@ async function startMedia(password: string) {
     const stream = fallback?.stream ?? fastCapture!;
     const track = fallback?.track ?? fastTrack!;
     mediaTrack = fallback?.track ?? null;
-    await candidate.publish(stream, { streamID: `host_${room}`, label: "Desktop" });
+    await candidate.publish(stream, {
+      streamID: `host_${room}`,
+      label: "Desktop",
+      ...(lowData ? { media: LOW_DATA_MEDIA } : {}),
+    });
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
     publishedTrack = track;
   } catch (error) {
@@ -280,6 +320,8 @@ async function start() {
   passwordField.value = config.password;
   if (await invoke<string>("transport_mode") === "external") {
     openHostButton.hidden = false;
+    fastCaptureButton.hidden = true;
+    lowDataButton.hidden = true;
     setStatus("Open browser host to receive connections");
     return;
   }
@@ -441,6 +483,7 @@ stopButton.addEventListener("click", async () => {
   await sdk?.disconnect();
   setStatus("Stopped");
   stopButton.disabled = true;
+  lowDataButton.disabled = true;
 });
 replacePasswordButton.addEventListener("click", async () => {
   replacePasswordButton.disabled = true;
@@ -459,6 +502,7 @@ replacePasswordButton.addEventListener("click", async () => {
     clearInvite();
     await sdk?.disconnect();
     stopButton.disabled = true;
+    lowDataButton.disabled = true;
     setStatus("Restarting with new password…");
   } catch {
     stopped = true;
@@ -472,6 +516,7 @@ replacePasswordButton.addEventListener("click", async () => {
     await sdk?.disconnect().catch(() => {});
     setStatus("Password replacement failed. Remote access is stopped.");
     stopButton.disabled = true;
+    lowDataButton.disabled = true;
     replacePasswordButton.disabled = false;
   }
 });

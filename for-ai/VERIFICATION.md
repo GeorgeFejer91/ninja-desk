@@ -30,6 +30,8 @@ For Linux, run the x86_64 Ubuntu 22.04 installer workflow, then install and run 
 
 For fast capture, use the installed Windows WebView and Linux browser host: select the primary monitor, confirm pointer mapping and no pre-auth media, then end browser sharing and verify automatic-capture fallback. Record the browser's applied resolution/frame rate, negotiated codec, and ICE route beside any latency measurements.
 
+For Low data mode, compare WebRTC outbound video bytes over equal 60-second still-screen and moving-screen sessions in normal and Low data modes on the same route. Verify the toggle both before and during a connection, primary-display pointer mapping after scaling, correct new frames after idle, and recovery when browser display constraints are refused. Record applied capture settings and sender bitrate parameters. Do not infer a data-savings percentage from configured limits alone.
+
 ## Publication
 
 Review staged files for credentials and generated artifacts before public commit. Push without force; verify remote SHA. Confirm Windows check and Pages workflows for that SHA, fetch the Pages HTML/assets, and run the installer workflow to confirm an NSIS executable artifact. Installer build does not prove installation. Report exact results, limitations, and control-plane changes.
