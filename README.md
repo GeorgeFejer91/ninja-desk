@@ -28,6 +28,8 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --bundles nsis
 ```
 
+On Linux, run `npm run tauri build` for the `.deb` and `.AppImage` bundles.
+
 The Windows installer appears in `src-tauri/target/release/bundle/nsis/`; Linux `.deb` and `.AppImage` bundles appear under `src-tauri/target/release/bundle/`. The [Pages workflow](./.github/workflows/pages.yml) deploys only `companion-dist/`. Installer workflows upload artifacts with finite retention. Passwords, frames, and clipboard items are never Pages assets. Windows protects the host password with DPAPI; Linux stores it in a user-only `0600` file in the app data directory.
 
 | Path | Owner |

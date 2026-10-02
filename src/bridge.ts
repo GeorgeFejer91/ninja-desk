@@ -4,10 +4,14 @@ type Event<T> = { payload: T };
 const browserHost = location.protocol === "http:" && location.hostname === "127.0.0.1";
 const hashToken = browserHost && /^#[0-9a-f]{64}$/.test(location.hash) ? location.hash.slice(1) : "";
 if (hashToken) {
-  sessionStorage.setItem("ninja-host-token", hashToken);
-  history.replaceState(null, "", location.pathname);
+  try {
+    sessionStorage.setItem("ninja-host-token", hashToken);
+    history.replaceState(null, "", location.pathname);
+  } catch { /* Keep the URL fragment if private mode disables storage. */ }
 }
-const token = hashToken || (browserHost ? sessionStorage.getItem("ninja-host-token") ?? "" : "");
+let storedToken = "";
+try { if (browserHost) storedToken = sessionStorage.getItem("ninja-host-token") ?? ""; } catch { /* Keep the URL token. */ }
+const token = hashToken || storedToken;
 
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!browserHost) return nativeInvoke<T>(command, args);
