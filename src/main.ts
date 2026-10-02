@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "./bridge";
 import VDONinja from "@vdoninja/sdk";
 import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "./fingerprints";
@@ -17,6 +16,8 @@ const revealButton = document.querySelector<HTMLButtonElement>("#reveal")!;
 const copyButton = document.querySelector<HTMLButtonElement>("#copy")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
 const replacePasswordButton = document.querySelector<HTMLButtonElement>("#replace-password")!;
+const controlButton = document.querySelector<HTMLButtonElement>("#control")!;
+const openHostButton = document.querySelector<HTMLButtonElement>("#open-host")!;
 document.querySelector<HTMLImageElement>("#brand-mark")!.src = logoUrl;
 document.querySelector<HTMLLinkElement>("#favicon")!.href = logoUrl;
 const canvas = document.querySelector<HTMLCanvasElement>("#screen")!;
@@ -33,9 +34,9 @@ blankScreen();
 
 let sdk: VDONinja | null = null;
 let mediaSdk: VDONinja | null = null;
+let mediaTrack: CanvasCaptureMediaStreamTrack | null = null;
 let activePeer: string | null = null;
 let stopped = false;
-let frameBusy = false;
 let startupStage = "bootstrap";
 
 function safeError(error: unknown): string {
@@ -54,6 +55,7 @@ function send(peer: string, data: object): boolean {
 function closeMedia() {
   const previous = mediaSdk;
   mediaSdk = null;
+  mediaTrack = null;
   void previous?.disconnect().catch(() => {});
 }
 
@@ -66,10 +68,20 @@ async function startMedia(password: string) {
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
     await candidate.joinRoom({ room, password });
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
-    await candidate.publish(canvas.captureStream(15), { streamID: `host_${room}`, label: "Windows desktop" });
+    let stream = canvas.captureStream(0);
+    let track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+    if (typeof track.requestFrame !== "function") {
+      stream.getTracks().forEach((item) => item.stop());
+      stream = canvas.captureStream(30);
+      track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+    } else {
+      mediaTrack = track;
+      track.requestFrame();
+    }
+    await candidate.publish(stream, { streamID: `host_${room}`, label: "Desktop" });
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
   } catch (error) {
-    if (mediaSdk === candidate) mediaSdk = null;
+    if (mediaSdk === candidate) { mediaSdk = null; mediaTrack = null; }
     await candidate.disconnect().catch(() => {});
     throw error;
   }
@@ -98,7 +110,7 @@ async function handleData(peer: string, data: unknown) {
         await invoke("disconnect", { peer }).catch(() => {});
         throw error;
       }
-      setStatus("Browser connected");
+      setStatus("Controller connected");
       return;
     }
     if (peer !== activePeer) return;
@@ -132,6 +144,11 @@ async function start() {
   const config = await invoke<Bootstrap>("bootstrap");
   startupStage = "events";
   passwordField.value = config.password;
+  if (await invoke<string>("transport_mode") === "external") {
+    openHostButton.hidden = false;
+    setStatus("Open browser host to receive connections");
+    return;
+  }
   sdk = new VDONinja({ password: config.password, salt: "vdo.ninja" });
   sdk.on("dataReceived", (event) => {
     if (!event.detail.fallback) void handleData(event.detail.uuid, event.detail.data);
@@ -142,7 +159,7 @@ async function start() {
       activePeer = null;
       closeMedia();
       blankScreen();
-      setStatus("Waiting for browser");
+      setStatus("Waiting for controller");
     }
   });
   sdk.on("disconnected", () => {
@@ -153,11 +170,10 @@ async function start() {
     if (!stopped) setStatus("Reconnecting…");
   });
   await listen<Frame>("screen-frame", async (event) => {
-    if (!activePeer || frameBusy || stopped) return;
-    frameBusy = true;
+    if (!activePeer || stopped) return;
+    const bytes = Uint8Array.from(atob(event.payload.jpegBase64), (char) => char.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
     try {
-      const bytes = Uint8Array.from(atob(event.payload.jpegBase64), (char) => char.charCodeAt(0));
-      const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
       if (canvas.width !== event.payload.width || canvas.height !== event.payload.height) {
         canvas.width = event.payload.width;
         canvas.height = event.payload.height;
@@ -181,10 +197,10 @@ async function start() {
           context.fill();
           context.stroke();
         }
+        mediaTrack?.requestFrame();
       }
-      bitmap.close();
     } finally {
-      frameBusy = false;
+      bitmap.close();
     }
   });
   startupStage = "signaling";
@@ -197,7 +213,7 @@ async function start() {
   setStatus("Publishing control channel…");
   await sdk.publish(controlCanvas.captureStream(1), { streamID: config.streamId, label: "Control channel" });
   startupStage = "ready";
-  setStatus("Waiting for browser");
+  setStatus("Waiting for controller");
   setInterval(async () => {
     if (!activePeer || stopped) return;
     const authoritativePeer = await invoke<string | null>("active_peer").catch(() => null);
@@ -205,7 +221,7 @@ async function start() {
       activePeer = null;
       closeMedia();
       blankScreen();
-      setStatus("Waiting for browser");
+      setStatus("Waiting for controller");
       return;
     }
     const text = await invoke<string | null>("read_clipboard").catch(() => null);
@@ -259,6 +275,13 @@ replacePasswordButton.addEventListener("click", async () => {
     stopButton.disabled = true;
     replacePasswordButton.disabled = false;
   }
+});
+
+controlButton.addEventListener("click", () => {
+  void invoke("open_controller").catch(() => setStatus("Could not open controller"));
+});
+openHostButton.addEventListener("click", () => {
+  void invoke("open_browser_host").catch(() => setStatus("Could not open browser host"));
 });
 
 void start().catch((error) => {

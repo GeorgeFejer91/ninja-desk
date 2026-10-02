@@ -3,6 +3,7 @@ import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
 import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, roomFromPassword, transcript } from "../src/protocol";
 import { watchTextFit } from "../src/text-fit";
+import { iceRoute } from "../src/route";
 import { clampPan, followPoint, imageRect, relativePoint, screenPoint, zoomPan, type View } from "./view-geometry";
 import "./style.css";
 
@@ -18,6 +19,7 @@ const viewOptions = document.querySelector<HTMLElement>("#view-options")!;
 const displayButton = document.querySelector<HTMLButtonElement>("#display-options")!;
 const fullscreenButton = document.querySelector<HTMLButtonElement>("#fullscreen")!;
 const sessionStatus = document.querySelector<HTMLElement>("#session-status")!;
+const routeStatus = document.querySelector<HTMLElement>("#route-status")!;
 const clipboardPanel = document.querySelector<HTMLElement>("#clipboard")!;
 const clipboardButton = document.querySelector<HTMLButtonElement>("#clipboard-toggle")!;
 const remoteText = document.querySelector<HTMLTextAreaElement>("#remote-text")!;
@@ -56,6 +58,7 @@ let viewScale = 1;
 let panX = 0;
 let panY = 0;
 let connectionTimer: number | null = null;
+let routeTimer: number | null = null;
 let immersiveFallback = false;
 const maxZoom = 32;
 
@@ -76,6 +79,9 @@ function resetConnection(message: string) {
   syncFullscreen();
   if (connectionTimer !== null) clearTimeout(connectionTimer);
   connectionTimer = null;
+  if (routeTimer !== null) clearInterval(routeTimer);
+  routeTimer = null;
+  routeStatus.textContent = "";
   const previous = sdk;
   const previousMedia = mediaSdk;
   sdk = null;
@@ -122,10 +128,20 @@ async function startMedia(password: string) {
       session.hidden = false;
       document.body.classList.add("in-session");
       setStatus("Connected");
+      const mediaPeer = received.detail.uuid;
+      const updateRoute = async () => {
+        if (mediaSdk !== candidate) return;
+        const entries = (await candidate.getStats(mediaPeer))[mediaPeer] ?? [];
+        routeStatus.textContent = iceRoute(entries, "viewer");
+      };
+      if (routeTimer !== null) clearInterval(routeTimer);
+      routeStatus.textContent = "Route unknown";
+      routeTimer = window.setInterval(() => { void updateRoute().catch(() => {}); }, 5000);
+      void updateRoute().catch(() => {});
       void video.play().catch(() => setStatus("Tap the screen to start video"));
     });
     candidate.on("peerDisconnected", () => {
-      if (mediaSdk === candidate) resetConnection("Laptop disconnected");
+      if (mediaSdk === candidate) resetConnection("Remote PC disconnected");
     });
     await candidate.connect();
     if (mediaSdk !== candidate) return;
@@ -570,10 +586,10 @@ copyRemote.addEventListener("click", async () => {
   catch { remoteText.select(); setStatus("Select and copy the text above"); }
 });
 pasteLocal.addEventListener("click", async () => {
-  try { localText.value = await navigator.clipboard.readText(); queueClipboard(localText.value); setStatus("Sent to laptop"); }
+  try { localText.value = await navigator.clipboard.readText(); queueClipboard(localText.value); setStatus("Sent to remote PC"); }
   catch { localText.focus(); setStatus("Paste into the text box, then send"); }
 });
-sendLocal.addEventListener("click", () => { queueClipboard(localText.value); setStatus("Sent to laptop"); });
+sendLocal.addEventListener("click", () => { queueClipboard(localText.value); setStatus("Sent to remote PC"); });
 localText.addEventListener("paste", () => { setTimeout(() => queueClipboard(localText.value), 0); });
 
 void watchTextFit();

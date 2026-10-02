@@ -25,6 +25,15 @@ to rediscover. Source and tests remain the authority for implementation facts.
 - Consequences: Source and the companion page are public. Remote control still requires the host-generated password. Preserve the internal Tauri identifier so existing DPAPI data remains readable.
 - Supersedes: None
 
+## D-0003 — Linux WebRTC in an external local browser
+
+- Date: 2026-10-02
+- Status: Accepted
+- Context: Linux WebKitGTK WebRTC is experimental or disabled in current releases, while the product transport depends on WebRTC.
+- Decision: Keep Rust as the Linux desktop authority and expose only a token-protected localhost API to a browser-host page bundled with the app. Use the default browser for Linux hosting and control; target X11 input. Windows retains its integrated WebView transport and controller.
+- Consequences: The browser host requires a local browser window and a working default browser. The Linux package must be tested on a real X11 desktop; build success cannot establish runtime support. The existing VDO.Ninja signaling path remains required and may select a direct or relayed ICE route.
+- Supersedes: None
+
 ## Record format
 
 For later decisions, add one compact entry with:

@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -6,19 +7,48 @@ use enigo::{Enigo, Mouse, Settings};
 use image::codecs::jpeg::JpegEncoder;
 use image::DynamicImage;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use xcap::Monitor;
 
 use crate::authority::Authority;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Frame {
+pub struct Frame {
     jpeg_base64: String,
     width: u32,
     height: u32,
     cursor_x: i32,
     cursor_y: i32,
+}
+
+#[derive(Default)]
+pub struct FrameStore(Mutex<(u64, Option<Frame>)>);
+
+#[derive(Serialize)]
+pub struct FrameResult {
+    seq: u64,
+    payload: Frame,
+}
+
+impl FrameStore {
+    pub fn latest(&self, since: u64) -> Option<FrameResult> {
+        let state = self.0.lock().ok()?;
+        if state.0 <= since {
+            return None;
+        }
+        Some(FrameResult {
+            seq: state.0,
+            payload: state.1.clone()?,
+        })
+    }
+
+    fn put(&self, frame: Frame) {
+        if let Ok(mut state) = self.0.lock() {
+            state.0 = state.0.wrapping_add(1);
+            state.1 = Some(frame);
+        }
+    }
 }
 
 pub fn spawn(app: AppHandle) {
@@ -66,14 +96,14 @@ pub fn spawn(app: AppHandle) {
                         cursor_x: cursor.0,
                         cursor_y: cursor.1,
                     };
-                    let _ = app.emit("screen-frame", frame);
+                    app.state::<FrameStore>().put(frame);
                 }
             } else {
                 monitor = None;
             }
             let elapsed = started.elapsed();
-            if elapsed < Duration::from_millis(67) {
-                thread::sleep(Duration::from_millis(67) - elapsed);
+            if elapsed < Duration::from_millis(33) {
+                thread::sleep(Duration::from_millis(33) - elapsed);
             }
         }
     });

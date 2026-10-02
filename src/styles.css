@@ -5,6 +5,7 @@
 :root { font: 400 14px/20px "IBM Plex Sans", sans-serif; color: #1c1917; background: #faf8f5; }
 * { box-sizing: border-box; }
 body { margin: 0; }
+[hidden] { display: none !important; }
 button, input { font: inherit; }
 button { min-height: 40px; padding: 9px 14px; border: 1px solid #d6d3d1; border-radius: 6px; color: #1c1917; background: #fff; cursor: pointer; }
 button:hover { background: #f5f5f4; }
