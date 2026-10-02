@@ -19,6 +19,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run check:protocol
+      - run: npm run check:view
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
       - run: cargo check --locked --manifest-path src-tauri/Cargo.toml
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
