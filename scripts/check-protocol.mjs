@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, createHmac, webcrypto } from 'node:crypto';
 import { hexToBytes, hmacHex, mouseMessage, roomFromPassword, transcript } from '../src/protocol.ts';
 import { iceRoute } from '../src/route.ts';
+import { MouseMoveQueue } from '../companion/mouse-queue.ts';
 
 globalThis.crypto ??= webcrypto;
 const password = '07'.repeat(32);
@@ -20,4 +21,18 @@ const stats = [
 assert.equal(iceRoute(stats, 'viewer'), 'Direct');
 assert.equal(iceRoute(stats.map(entry => entry.id === 'remote' ? { ...entry, candidateType: 'relay' } : entry), 'viewer'), 'Relayed');
 assert.equal(iceRoute(stats.slice(0, 2), 'viewer'), 'Route unknown');
+const sent = [];
+const moves = new MouseMoveQueue(async (point) => {
+  sent.push(point);
+  return sent.length;
+});
+for (let i = 0; i < 4; i++) moves.move(i, i);
+await Promise.resolve();
+for (let i = 4; i < 100; i++) moves.move(i, i);
+assert.equal(sent.length, 4, 'only four moves may await acknowledgement');
+moves.ack(1);
+assert.deepEqual(sent.at(-1), { x: 99, y: 99 }, 'the newest position must replace stale moves');
+moves.reset();
+moves.ack(2);
+assert.equal(sent.length, 5, 'old acknowledgements must not flush a new session');
 console.log('Protocol vectors passed');

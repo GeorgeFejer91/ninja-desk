@@ -127,6 +127,14 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
             serde_json::to_value(app.state::<FrameStore>().latest(since))
                 .map_err(|_| "state_error".into())
         }
+        "set_screen_capture_paused" => {
+            let paused = args
+                .get("paused")
+                .and_then(Value::as_bool)
+                .ok_or("invalid_capture")?;
+            app.state::<FrameStore>().set_paused(paused);
+            Ok(Value::Null)
+        }
         "disconnect" => {
             let peer = args
                 .get("peer")

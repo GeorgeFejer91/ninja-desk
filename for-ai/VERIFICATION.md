@@ -28,6 +28,8 @@ Use Windows Actions if the local MSVC linker is unavailable. Build/test evidence
 
 For Linux, run the x86_64 Ubuntu 22.04 installer workflow, then install and run the exact `.deb` or `.AppImage` on an X11 desktop. Open the browser host and a second PC's controller, verify capture, mouse, clipboard, Stop/reconnect, and secret-file permissions. Wayland is outside the current target. For latency claims, measure input-to-effect and screen-change-to-viewer display p50/p95/p99 on real devices and record the ICE route; frame-rate settings and builds alone are not latency evidence.
 
+For fast capture, use the installed Windows WebView and Linux browser host: select the primary monitor, confirm pointer mapping and no pre-auth media, then end browser sharing and verify automatic-capture fallback. Record the browser's applied resolution/frame rate, negotiated codec, and ICE route beside any latency measurements.
+
 ## Publication
 
 Review staged files for credentials and generated artifacts before public commit. Push without force; verify remote SHA. Confirm Windows check and Pages workflows for that SHA, fetch the Pages HTML/assets, and run the installer workflow to confirm an NSIS executable artifact. Installer build does not prove installation. Report exact results, limitations, and control-plane changes.

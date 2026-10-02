@@ -40,7 +40,7 @@ export async function listen<T>(event: string, handler: (event: Event<T>) => voi
     while (active) {
       try {
         const frame = await invoke<{ seq: number; payload: T } | null>("read_frame", { since: seq });
-        if (active && frame) { seq = frame.seq; await handler({ payload: frame.payload }); }
+        if (active && frame) { seq = frame.seq; await handler({ payload: frame.payload }); continue; }
       } catch { /* The next poll retries while the app is running. */ }
       await new Promise((resolve) => setTimeout(resolve, 16));
     }

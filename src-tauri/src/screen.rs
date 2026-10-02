@@ -81,6 +81,9 @@ fn monitor_origin(monitor: &Monitor) -> (i32, i32) {
 
 impl FrameStore {
     pub fn latest(&self, since: u64) -> Option<FrameResult> {
+        if self.paused() {
+            return None;
+        }
         let state = self.frame.lock().ok()?;
         if state.0 <= since {
             return None;
@@ -93,6 +96,9 @@ impl FrameStore {
 
     fn put(&self, frame: Frame) {
         if let Ok(mut state) = self.frame.lock() {
+            if self.paused() {
+                return;
+            }
             state.0 = state.0.wrapping_add(1);
             state.1 = Some(frame);
         }
@@ -160,4 +166,30 @@ pub fn spawn(app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_capture_does_not_replay_old_frames() {
+        let frames = FrameStore::default();
+        let frame = Frame {
+            jpeg_base64: String::new(),
+            width: 1,
+            height: 1,
+            cursor_x: 0,
+            cursor_y: 0,
+        };
+        frames.put(frame.clone());
+        assert!(frames.latest(0).is_some());
+        frames.set_paused(true);
+        frames.put(frame.clone());
+        assert!(frames.latest(0).is_none());
+        frames.set_paused(false);
+        assert!(frames.latest(0).is_none());
+        frames.put(frame);
+        assert!(frames.latest(1).is_some());
+    }
 }

@@ -5,6 +5,7 @@ import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessag
 import { watchTextFit } from "../src/text-fit";
 import { iceRoute } from "../src/route";
 import { clampPan, followPoint, imageRect, relativePoint, screenPoint, zoomPan, type View } from "./view-geometry";
+import { MouseMoveQueue } from "./mouse-queue";
 import "./style.css";
 
 const form = document.querySelector<HTMLFormElement>("#connect-form")!;
@@ -42,7 +43,6 @@ let clientNonce = "";
 let helloSent = false;
 let authTranscript = "";
 let seq = 0;
-let queuedMoves = 0;
 let commandQueue: Promise<void> = Promise.resolve();
 let lastPosition = { x: 32768, y: 32768 };
 let inputMode: "mouse" | "touch" = "mouse";
@@ -74,6 +74,8 @@ function safeError(error: unknown): string {
 
 function resetConnection(message: string) {
   cancelTouch();
+  moveQueue.reset();
+  commandQueue = Promise.resolve();
   if (document.fullscreenElement === session) void document.exitFullscreen().catch(() => {});
   immersiveFallback = false;
   syncFullscreen();
@@ -161,18 +163,30 @@ function send(data: object) {
   }
 }
 
+function sendMouse(op: number, x: number, y: number, arg: number): Promise<number> {
+  const key = sessionKey;
+  const target = hostUuid;
+  const peer = clientUuid;
+  const currentSdk = sdk;
+  const currentGeneration = generation;
+  const job = commandQueue.then(async () => {
+    if (!key || !target || !peer || !currentSdk || sessionKey !== key || sdk !== currentSdk) throw new Error("Connection closed");
+    const next = ++seq;
+    const mac = await hmacHex(key, mouseMessage(currentGeneration, peer, next, op, x, y, arg));
+    if (sessionKey !== key || sdk !== currentSdk || !currentSdk.sendData({ type: "mouse", seq: next, op, x, y, arg, mac }, { uuid: target, allowFallback: false })) throw new Error("Connection closed");
+    return next;
+  });
+  commandQueue = job.then(() => {}, () => { if (sdk === currentSdk) setStatus("Connection interrupted"); });
+  return job;
+}
+
+const moveQueue = new MouseMoveQueue(({ x, y }) => sendMouse(1, x, y, 0));
+
 function queueMouse(op: number, x = lastPosition.x, y = lastPosition.y, arg = 0) {
   if (!sessionKey || !hostUuid || !clientUuid || !sdk) return;
-  if (op === 1 && queuedMoves >= 2) return;
-  if (op === 1) queuedMoves++;
-  commandQueue = commandQueue.then(async () => {
-    if (!sessionKey || !sdk || !hostUuid || !clientUuid) return;
-    const next = ++seq;
-    const mac = await hmacHex(sessionKey, mouseMessage(generation, clientUuid, next, op, x, y, arg));
-    send({ type: "mouse", seq: next, op, x, y, arg, mac });
-  }).catch(() => setStatus("Connection interrupted")).finally(() => {
-    if (op === 1) queuedMoves--;
-  });
+  if (op === 1) { moveQueue.move(x, y); return; }
+  moveQueue.cancelPending();
+  void sendMouse(op, x, y, arg).catch(() => {});
 }
 
 function queueClipboard(text: string) {
@@ -181,12 +195,17 @@ function queueClipboard(text: string) {
     setStatus("Clipboard text is too large");
     return;
   }
+  const key = sessionKey;
+  const target = hostUuid;
+  const peer = clientUuid;
+  const currentSdk = sdk;
+  const currentGeneration = generation;
   commandQueue = commandQueue.then(async () => {
-    if (!sessionKey || !sdk || !hostUuid || !clientUuid) return;
+    if (sessionKey !== key || sdk !== currentSdk) return;
     const next = ++seq;
-    const mac = await hmacHex(sessionKey, await clipboardMessage(generation, clientUuid, next, text));
-    send({ type: "clipboard", seq: next, text, mac });
-  }).catch(() => setStatus("Connection interrupted"));
+    const mac = await hmacHex(key, await clipboardMessage(currentGeneration, peer, next, text));
+    if (sessionKey !== key || sdk !== currentSdk || !currentSdk.sendData({ type: "clipboard", seq: next, text, mac }, { uuid: target, allowFallback: false })) throw new Error("Connection closed");
+  }).catch(() => { if (sdk === currentSdk) setStatus("Connection interrupted"); });
 }
 
 function view(): View {
@@ -253,7 +272,10 @@ async function handleData(uuid: string, data: unknown) {
       try { await navigator.clipboard.writeText(data.text); } catch { /* Copy button remains available. */ }
       return;
     }
-    if (data.type === "ack" && data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
+    if (data.type === "ack" && typeof data.seq === "number") {
+      moveQueue.ack(data.seq);
+      if (data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
+    }
   } catch (error) {
     console.warn(`[client] authentication failed: ${safeError(error)}`);
     resetConnection("Authentication failed");

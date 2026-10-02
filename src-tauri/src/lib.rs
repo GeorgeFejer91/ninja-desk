@@ -132,6 +132,11 @@ fn read_frame(
 }
 
 #[tauri::command]
+fn set_screen_capture_paused(frames: State<'_, screen::FrameStore>, paused: bool) {
+    frames.set_paused(paused);
+}
+
+#[tauri::command]
 fn disconnect(authority: State<'_, Authority>, peer: String) {
     authority.disconnect(&peer);
 }
@@ -178,6 +183,7 @@ pub fn run() {
             read_clipboard,
             active_peer,
             read_frame,
+            set_screen_capture_paused,
             disconnect,
             stop,
             replace_password,
