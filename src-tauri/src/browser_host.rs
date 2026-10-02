@@ -22,6 +22,7 @@ struct AuthArgs {
     client_cert: Option<String>,
     client_nonce: Option<String>,
     proof: Option<String>,
+    invite_id: Option<String>,
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -78,12 +79,31 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
         "bootstrap" => {
             serde_json::to_value(authority.bootstrap()?).map_err(|_| "state_error".into())
         }
+        "create_access_link" => {
+            serde_json::to_value(authority.create_access_link()?).map_err(|_| "state_error".into())
+        }
+        "revoke_access_link" => {
+            let id = args
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("invalid_invite")?;
+            authority.revoke_access_link(id);
+            Ok(Value::Null)
+        }
+        "access_link_active" => {
+            let id = args
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("invalid_invite")?;
+            Ok(json!(authority.access_link_active(id)))
+        }
         "begin_auth" => {
             let args: AuthArgs = serde_json::from_value(args).map_err(|_| "invalid_auth")?;
             serde_json::to_value(authority.begin_auth(
                 args.peer,
                 args.host_cert.ok_or("invalid_auth")?,
                 args.client_cert.ok_or("invalid_auth")?,
+                args.invite_id,
             )?)
             .map_err(|_| "state_error".into())
         }
@@ -93,6 +113,7 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
                 args.peer,
                 args.client_nonce.ok_or("invalid_auth")?,
                 args.proof.ok_or("invalid_auth")?,
+                args.invite_id,
             )?)
             .map_err(|_| "state_error".into())
         }
