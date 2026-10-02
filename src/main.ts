@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import VDONinja from "@vdoninja/sdk";
+import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "./fingerprints";
 import { isRecord, roomFromPassword } from "./protocol";
 import { watchTextFit } from "./text-fit";
@@ -16,6 +17,8 @@ const revealButton = document.querySelector<HTMLButtonElement>("#reveal")!;
 const copyButton = document.querySelector<HTMLButtonElement>("#copy")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
 const replacePasswordButton = document.querySelector<HTMLButtonElement>("#replace-password")!;
+document.querySelector<HTMLImageElement>("#brand-mark")!.src = logoUrl;
+document.querySelector<HTMLLinkElement>("#favicon")!.href = logoUrl;
 const canvas = document.querySelector<HTMLCanvasElement>("#screen")!;
 const context = canvas.getContext("2d", { alpha: false })!;
 const controlCanvas = document.createElement("canvas");
@@ -232,6 +235,10 @@ stopButton.addEventListener("click", async () => {
 });
 replacePasswordButton.addEventListener("click", async () => {
   replacePasswordButton.disabled = true;
+  copyButton.disabled = true;
+  revealButton.disabled = true;
+  passwordField.value = "";
+  setStatus("Replacing password and restarting…");
   try {
     await invoke("replace_password");
     stopped = true;
@@ -239,11 +246,8 @@ replacePasswordButton.addEventListener("click", async () => {
     closeMedia();
     blankScreen();
     await sdk?.disconnect();
-    passwordField.value = "";
     stopButton.disabled = true;
-    copyButton.disabled = true;
-    revealButton.disabled = true;
-    setStatus("Password replaced. Restart app to see the new password.");
+    setStatus("Restarting with new password…");
   } catch {
     stopped = true;
     activePeer = null;
@@ -253,6 +257,7 @@ replacePasswordButton.addEventListener("click", async () => {
     await sdk?.disconnect().catch(() => {});
     setStatus("Password replacement failed. Remote access is stopped.");
     stopButton.disabled = true;
+    replacePasswordButton.disabled = false;
   }
 });
 

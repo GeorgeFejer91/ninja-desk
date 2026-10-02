@@ -68,7 +68,9 @@ fn replace_password(app: tauri::AppHandle, authority: State<'_, Authority>) -> R
         .path()
         .app_data_dir()
         .map_err(|_| "secret_store_failed")?;
-    authority.replace_password(&data_dir)
+    authority.replace_password(&data_dir)?;
+    app.request_restart();
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

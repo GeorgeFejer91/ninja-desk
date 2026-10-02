@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ninja Desk</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23121920'/%3E%3Crect x='12' y='14' width='40' height='30' rx='3' fill='none' stroke='%23b5e0f0' stroke-width='4'/%3E%3Cpath d='M24 52h16M32 44v8' stroke='%23b5e0f0' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link id="favicon" rel="icon" type="image/svg+xml" />
     <script type="module" src="/main.ts" defer></script>
   </head>
   <body>
     <main class="companion-layout">
       <header class="companion-header">
-        <h1 data-fit>Ninja Desk</h1>
+        <div class="brand"><img id="brand-mark" alt="" width="36" height="36" /><h1 data-fit>Ninja Desk</h1></div>
         <span id="status" data-fit role="status">Enter the access password</span>
       </header>
       <form id="connect-form" class="connect-form">

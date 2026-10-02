@@ -7,6 +7,7 @@ Ninja Desk gives one owner live view, mouse control, and two-way text clipboard 
 - `src-tauri/`: Rust local authority, capture, password, session, mouse, clipboard.
 - `src/` and root `index.html`: Tauri WebView, Ninja SDK adapter, shared protocol.
 - `companion/`: static browser UI. `vite.companion.config.ts` builds `companion-dist/`.
+- `branding/`: original transparent logo source and raster exports; `src-tauri/icons/` contains generated installer/app icons.
 - `.github/workflows/`: Windows checks/installer artifact and Pages.
 - `README.md` and `DESIGN.md`: user and product documentation.
 - `for-ai/`: agent control plane; `.for-ai-local/`: ignored evidence.

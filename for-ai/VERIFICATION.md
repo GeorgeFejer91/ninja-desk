@@ -23,7 +23,7 @@ cargo check --locked --manifest-path src-tauri/Cargo.toml
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-Use Windows Actions if the local MSVC linker is unavailable. Build/test evidence does not replace a real browser/Windows session. For protocol/UI changes, observe wrong-password rejection, no pre-auth media, Stop/reconnect, pointer mapping, and clipboard. Phone and cross-network claims need those actual surfaces.
+Use Windows Actions if the local MSVC linker is unavailable. Build/test evidence does not replace a real browser/Windows session. For protocol/UI changes, observe wrong-password rejection, no pre-auth media, Stop/reconnect, pointer mapping, and clipboard. For password replacement, verify the old grant is revoked, the app restarts, the new password appears, and the old password is refused. Phone and cross-network claims need those actual surfaces.
 
 ## Publication
 

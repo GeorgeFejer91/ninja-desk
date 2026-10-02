@@ -16,7 +16,9 @@ h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
 h2 { font-size: 15px; line-height: 22px; font-weight: 600; margin-bottom: 10px; }
 p { color: #57534e; margin-top: 10px; }
 .host-layout { max-width: 720px; margin: 0 auto; padding: 24px; display: grid; gap: 30px; }
-.host-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e7e5e4; padding-bottom: 16px; }
+.host-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e7e5e4; padding-bottom: 16px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.brand img { display: block; flex: none; width: 36px; height: 36px; }
 #status { color: #57534e; text-align: right; }
 .password-row { display: flex; gap: 8px; min-width: 0; }
 .password-row input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid #d6d3d1; border-radius: 6px; background: #fff; }

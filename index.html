@@ -4,13 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="/src/styles.css" />
+    <link id="favicon" rel="icon" type="image/svg+xml" />
     <title>Ninja Desk</title>
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
     <main class="host-layout">
       <header class="host-header">
-        <h1 data-fit>Ninja Desk</h1>
+        <div class="brand"><img id="brand-mark" alt="" width="36" height="36" /><h1 data-fit>Ninja Desk</h1></div>
         <span id="status" data-fit role="status">Starting…</span>
       </header>
       <section aria-labelledby="password-heading">
@@ -20,7 +21,7 @@
           <button id="reveal" type="button" data-fit>Show</button>
           <button id="copy" type="button" data-fit>Copy</button>
         </div>
-        <p data-fit>Enter this password in the browser companion. It stays on this Windows account.</p>
+        <p data-fit>Enter this password in the browser companion. Replacing it restarts Ninja Desk automatically.</p>
       </section>
       <div class="host-actions">
         <button id="stop" type="button" class="danger" data-fit>Stop remote access</button>

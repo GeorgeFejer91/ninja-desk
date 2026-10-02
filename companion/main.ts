@@ -1,4 +1,5 @@
 import VDONinja from "@vdoninja/sdk";
+import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
 import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, roomFromPassword, transcript } from "../src/protocol";
 import { watchTextFit } from "../src/text-fit";
@@ -21,6 +22,8 @@ const localText = document.querySelector<HTMLTextAreaElement>("#local-text")!;
 const copyRemote = document.querySelector<HTMLButtonElement>("#copy-remote")!;
 const pasteLocal = document.querySelector<HTMLButtonElement>("#paste-local")!;
 const sendLocal = document.querySelector<HTMLButtonElement>("#send-local")!;
+document.querySelector<HTMLImageElement>("#brand-mark")!.src = logoUrl;
+document.querySelector<HTMLLinkElement>("#favicon")!.href = logoUrl;
 
 let sdk: VDONinja | null = null;
 let mediaSdk: VDONinja | null = null;
