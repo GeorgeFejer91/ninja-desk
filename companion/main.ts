@@ -1,12 +1,19 @@
 import VDONinja from "@vdoninja/sdk";
 import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
-import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, roomFromPassword, transcript } from "../src/protocol";
+import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from "../src/protocol";
 import { watchTextFit } from "../src/text-fit";
 import { iceRoute } from "../src/route";
 import { clampPan, followPoint, imageRect, relativePoint, screenPoint, zoomPan, type View } from "./view-geometry";
 import { MouseMoveQueue } from "./mouse-queue";
 import "./style.css";
+
+const accessFragment = location.hash;
+if (accessFragment.startsWith("#access=")) history.replaceState(null, "", location.pathname + location.search);
+let initialAccessSecret: string | null = null;
+let invalidAccessLink = false;
+try { initialAccessSecret = parseAccessFragment(accessFragment)?.secret ?? null; }
+catch { invalidAccessLink = true; }
 
 const form = document.querySelector<HTMLFormElement>("#connect-form")!;
 const passwordInput = document.querySelector<HTMLInputElement>("#password")!;
@@ -59,6 +66,7 @@ let panX = 0;
 let panY = 0;
 let connectionTimer: number | null = null;
 let routeTimer: number | null = null;
+let usingAccessLink = false;
 let immersiveFallback = false;
 const maxZoom = 32;
 
@@ -91,6 +99,8 @@ function resetConnection(message: string) {
   hostUuid = null;
   clientUuid = null;
   passwordBytes = null;
+  usingAccessLink = false;
+  passwordInput.value = "";
   sessionKey = null;
   helloSent = false;
   seq = 0;
@@ -263,7 +273,7 @@ async function handleData(uuid: string, data: unknown) {
       return;
     }
     if (data.type === "auth_error") {
-      resetConnection("Access denied or host busy");
+      resetConnection(usingAccessLink ? "Link unavailable. Use the password or create a new link." : "Access denied or host busy");
       return;
     }
     if (!sessionKey) return;
@@ -282,21 +292,21 @@ async function handleData(uuid: string, data: unknown) {
   }
 }
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+async function connect(password: string, viaLink = false) {
   if (connectButton.disabled) return;
   connectButton.disabled = true;
+  usingAccessLink = viaLink;
   try {
-    const password = passwordInput.value.trim().toLowerCase();
-    room = await roomFromPassword(password);
+    const routePassword = viaLink ? await routePasswordForAccessLink(password) : password;
+    room = await roomFromPassword(routePassword);
     passwordBytes = hexToBytes(password);
     clientNonce = nonce();
     clientUuid = null;
     helloSent = false;
-    sdk = new VDONinja({ password, salt: "vdo.ninja" });
+    sdk = new VDONinja({ password: routePassword, salt: "vdo.ninja" });
     const attempt = sdk;
     connectionTimer = window.setTimeout(() => {
-      if (sdk === attempt && session.hidden) resetConnection("Could not connect. Check the password and host app.");
+      if (sdk === attempt && session.hidden) resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
     }, 30000);
     sdk.on("peerConnected", () => console.info("[client] peer connected"));
     sdk.on("dataChannelOpen", (opened) => console.info(`[client] data channel open: ${opened.detail.type}`));
@@ -334,18 +344,26 @@ form.addEventListener("submit", async (event) => {
         resetConnection("Laptop disconnected");
       }
     });
-    setStatus("Connecting…");
+    setStatus(viaLink ? "Connecting with access link…" : "Connecting…");
     await attempt.connect();
     if (sdk !== attempt) return;
-    await attempt.joinRoom({ room, password });
+    await attempt.joinRoom({ room, password: routePassword });
     if (sdk !== attempt) return;
     await attempt.view(`host_${room}`, { audio: false, video: true });
     if (sdk === attempt && !sessionKey) setStatus("Checking access…");
   } catch (error) {
     console.warn(`[client] connection failed: ${safeError(error)}`);
-    resetConnection("Could not connect. Check the password and host app.");
+    resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
   }
+}
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void connect(passwordInput.value.trim().toLowerCase());
 });
+
+if (initialAccessSecret) void connect(initialAccessSecret, true);
+else if (invalidAccessLink) setStatus("Invalid access link. Enter the host password instead.");
 
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }
 

@@ -23,6 +23,19 @@
         </div>
         <p data-fit>Enter this password on another PC or in the browser companion. Replacing it restarts Ninja Desk automatically.</p>
       </section>
+      <section aria-labelledby="link-heading">
+        <h2 id="link-heading" data-fit>24-hour access link</h2>
+        <p data-fit>Open one link on your phone or another browser to connect directly. Anyone with the link can control this PC until it expires or you revoke it.</p>
+        <button id="create-link" type="button" data-fit>Create access link</button>
+        <div id="link-details" hidden>
+          <div class="password-row">
+            <input id="access-link" aria-label="24-hour access link" type="text" readonly spellcheck="false" />
+            <button id="copy-link" type="button" data-fit>Copy link</button>
+            <button id="revoke-link" type="button" data-fit>Revoke link</button>
+          </div>
+          <p id="link-expiry" data-fit></p>
+        </div>
+      </section>
       <div class="host-actions">
         <button id="open-host" type="button" data-fit hidden>Open browser host</button>
         <button id="fast-capture" type="button" data-fit>Share primary display (fast)</button>

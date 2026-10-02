@@ -24,7 +24,7 @@ cargo check --locked --manifest-path src-tauri/Cargo.toml
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-Use Windows Actions if the local MSVC linker is unavailable. Build/test evidence does not replace a real browser/Windows session. For protocol/UI changes, observe wrong-password rejection, no pre-auth media, Stop/reconnect, pointer mapping, and clipboard. For password replacement, verify the old grant is revoked, the app restarts, the new password appears, and the old password is refused. Phone and cross-network claims need those actual surfaces.
+Use Windows Actions if the local MSVC linker is unavailable. Build/test evidence does not replace a real browser/Windows session. For protocol/UI changes, observe wrong-password rejection, no pre-auth media, Stop/reconnect, pointer mapping, and clipboard. For password replacement, verify the old grant is revoked, the app restarts, the new password appears, and the old password is refused. For access links, verify direct URL open without password entry, the same screen/pointer/clipboard path, and old-link rejection after replacement, revocation, expiry, and app restart. Phone and cross-network claims need those actual surfaces.
 
 For Linux, run the x86_64 Ubuntu 22.04 installer workflow, then install and run the exact `.deb` or `.AppImage` on an X11 desktop. Open the browser host and a second PC's controller, verify capture, mouse, clipboard, Stop/reconnect, and secret-file permissions. Wayland is outside the current target. For latency claims, measure input-to-effect and screen-change-to-viewer display p50/p95/p99 on real devices and record the ICE route; frame-rate settings and builds alone are not latency evidence.
 
