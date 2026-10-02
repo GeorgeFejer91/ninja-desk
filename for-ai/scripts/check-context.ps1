@@ -114,15 +114,15 @@ if ($LASTEXITCODE -ne 0) {
         $head = (& git -C $root rev-parse HEAD 2>$null).Trim()
         $previousPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        $remoteLine = (& git -C $root ls-remote origin refs/heads/main 2>$null | Select-Object -First 1)
+        $remoteLine = (& git -C $root ls-remote origin "refs/heads/$branch" 2>$null | Select-Object -First 1)
         $remoteExit = $LASTEXITCODE
         $ErrorActionPreference = $previousPreference
         if ($remoteExit -ne 0 -or [string]::IsNullOrWhiteSpace($remoteLine)) {
-            Add-Error "origin/main could not be resolved."
+            Add-Error "origin/$branch could not be resolved."
         } else {
             $remoteHead = ($remoteLine -split "\s+")[0]
             if ($head -ne $remoteHead) {
-                Add-Error "Local HEAD does not match origin/main."
+                Add-Error "Local HEAD does not match origin/$branch."
             }
         }
     }

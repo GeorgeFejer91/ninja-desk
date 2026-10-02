@@ -34,6 +34,15 @@ to rediscover. Source and tests remain the authority for implementation facts.
 - Consequences: The browser host requires a local browser window and a working default browser. The Linux package must be tested on a real X11 desktop; build success cannot establish runtime support. The existing VDO.Ninja signaling path remains required and may select a direct or relayed ICE route.
 - Supersedes: None
 
+## D-0004 — Separate Linux screen capture dependency
+
+- Date: 2026-10-02
+- Status: Accepted
+- Context: `xcap` links PipeWire on Linux even for X11 capture, and its current PipeWire bindings do not compile against Ubuntu 22.04 headers.
+- Decision: Use `screenshots` for the Linux capture path and keep `xcap` for Windows. Convert the Linux image buffer into the existing JPEG encoder's image type without copying pixels.
+- Consequences: The Ubuntu 22.04 installer can target X11 without PipeWire build headers. Capture and control still require a real X11 desktop test.
+- Supersedes: None
+
 ## Record format
 
 For later decisions, add one compact entry with:
