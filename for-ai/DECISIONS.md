@@ -12,8 +12,17 @@ to rediscover. Source and tests remain the authority for implementation facts.
 - Decision: Use a short root `AGENTS.md` that routes to a lowercase `for-ai/`
   control plane. Keep product output outside that folder and add project files,
   skills, and protocols only for current requirements.
-- Consequences: New agents get a reliable map and readiness gates. The first
-  product task must still choose the smallest suitable output structure.
+- Consequences: New agents get a reliable map and readiness gates. Product
+  ownership was later recorded in `PROJECT.md`.
+- Supersedes: None
+
+## D-0002 — One public product repository
+
+- Date: 2026-10-02
+- Status: Accepted
+- Context: The host and public companion were split across two repositories; the user requested one public project with an installer and Pages.
+- Decision: Keep host, companion, documentation, and workflows in this public repository. Deploy only the built companion to Pages. Build the Windows NSIS installer as a separate Actions artifact.
+- Consequences: Source and the companion page are public. Remote control still requires the host-generated password. Preserve the internal Tauri identifier so existing DPAPI data remains readable.
 - Supersedes: None
 
 ## Record format

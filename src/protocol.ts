@@ -1,0 +1,49 @@
+const encoder = new TextEncoder();
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export function hexToBytes(hex: string): Uint8Array {
+  if (!/^(?:[0-9a-fA-F]{2})+$/.test(hex)) throw new Error("Invalid access password");
+  return Uint8Array.from(hex.match(/../g)!, (part) => Number.parseInt(part, 16));
+}
+
+export function nonce(): string {
+  return bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+}
+
+export async function sha256Hex(data: Uint8Array | string): Promise<string> {
+  const bytes = typeof data === "string" ? encoder.encode(data) : data;
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)));
+}
+
+export async function hmacBytes(key: Uint8Array, message: string): Promise<Uint8Array> {
+  const imported = await crypto.subtle.importKey("raw", key as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", imported, encoder.encode(message)));
+}
+
+export async function hmacHex(key: Uint8Array, message: string): Promise<string> {
+  return bytesToHex(await hmacBytes(key, message));
+}
+
+export async function roomFromPassword(password: string): Promise<string> {
+  if (!/^[0-9a-fA-F]{64}$/.test(password)) throw new Error("Access password must be 64 hexadecimal characters");
+  return (await sha256Hex(hexToBytes(password))).slice(0, 32);
+}
+
+export function transcript(room: string, generation: string, peer: string, hostNonce: string, clientNonce: string, hostCert: string, clientCert: string): string {
+  return `v1|${room}|${generation}|${peer}|${hostNonce}|${clientNonce}|${hostCert}|${clientCert}`;
+}
+
+export function mouseMessage(generation: string, peer: string, seq: number, op: number, x: number, y: number, arg: number): string {
+  return `mouse|${generation}|${peer}|${seq}|${op}|${x}|${y}|${arg}`;
+}
+
+export async function clipboardMessage(generation: string, peer: string, seq: number, text: string): Promise<string> {
+  return `clipboard|${generation}|${peer}|${seq}|${await sha256Hex(text)}`;
+}

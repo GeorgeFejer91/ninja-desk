@@ -52,4 +52,6 @@ Created: 2026-10-02
 Repository: https://github.com/GeorgeFejer91/ninja-desk
 Visibility at initialization: public
 
-No product stack or output tree is implied by this bootstrap.
+This is the canonical public repository for the Tauri host, browser companion,
+Windows installer workflow, and GitHub Pages deployment. Read `PROJECT.md` for
+the ownership map and `VERIFICATION.md` before claiming readiness.

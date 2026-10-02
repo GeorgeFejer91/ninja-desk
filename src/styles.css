@@ -1,0 +1,25 @@
+@import "@fontsource/ibm-plex-sans/latin-400.css";
+@import "@fontsource/ibm-plex-sans/latin-500.css";
+@import "@fontsource/ibm-plex-sans/latin-600.css";
+
+:root { font: 400 14px/20px "IBM Plex Sans", sans-serif; color: #1c1917; background: #faf8f5; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input { font: inherit; }
+button { min-height: 40px; padding: 9px 14px; border: 1px solid #d6d3d1; border-radius: 6px; color: #1c1917; background: #fff; cursor: pointer; }
+button:hover { background: #f5f5f4; }
+button:focus-visible, input:focus-visible { outline: 2px solid #b45309; outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: default; }
+button.danger { border-color: #b91c1c; color: #b91c1c; }
+h1, h2, p { margin: 0; }
+h1 { font-size: 20px; line-height: 28px; font-weight: 600; }
+h2 { font-size: 15px; line-height: 22px; font-weight: 600; margin-bottom: 10px; }
+p { color: #57534e; margin-top: 10px; }
+.host-layout { max-width: 720px; margin: 0 auto; padding: 24px; display: grid; gap: 30px; }
+.host-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e7e5e4; padding-bottom: 16px; }
+#status { color: #57534e; text-align: right; }
+.password-row { display: flex; gap: 8px; min-width: 0; }
+.password-row input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid #d6d3d1; border-radius: 6px; background: #fff; }
+.host-actions { display: flex; justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+[data-fit] { overflow-wrap: break-word; }
+@media (max-width: 420px) { .host-layout { padding: 16px; gap: 24px; } .password-row { flex-wrap: wrap; } .password-row input { flex-basis: 100%; } .host-header { flex-wrap: wrap; } }

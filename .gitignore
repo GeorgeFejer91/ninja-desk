@@ -1,5 +1,9 @@
 # Local agent/runtime artifacts
 .for-ai-local/
+node_modules/
+dist/
+companion-dist/
+src-tauri/target/
 
 # Local configuration and credentials
 .env

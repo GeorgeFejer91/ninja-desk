@@ -1,41 +1,24 @@
 # Project contract
 
-## Purpose
+Ninja Desk gives one owner live view, mouse control, and two-way text clipboard transfer to a signed-in Windows desktop. This single public repository contains the Tauri host, GitHub Pages companion, and NSIS installer workflow.
 
-Ninja Desk lets one owner control a Windows desktop from a browser over VDO.Ninja-compatible WebRTC.
+## Ownership
 
-## Primary goal
+- `src-tauri/`: Rust local authority, capture, password, session, mouse, clipboard.
+- `src/` and root `index.html`: Tauri WebView, Ninja SDK adapter, shared protocol.
+- `companion/`: static browser UI. `vite.companion.config.ts` builds `companion-dist/`.
+- `.github/workflows/`: Windows checks/installer artifact and Pages.
+- `README.md` and `DESIGN.md`: user and product documentation.
+- `for-ai/`: agent control plane; `.for-ai-local/`: ignored evidence.
 
-Deliver the smallest usable result that satisfies the current user request and
-can be verified at its real output surface.
+## Constraints
 
-## Non-goals
+- Remote desktop authority remains in Rust. Never place credentials in Pages or Git.
+- Preserve Tauri identifier `dev.local.vdoninjaremote` through migration so existing Windows DPAPI app data remains accessible.
+- One controller, ordinary signed-in Windows desktop, primary display, text clipboard. See `DESIGN.md`.
+- A successful build does not prove phone, cross-network, or end-to-end runtime behavior.
+- The earlier host and companion repositories are migration sources; this repository owns ongoing product work.
 
-- No speculative framework, service, abstraction, compatibility layer, or
-  deployment system.
-- No second implementation tree or duplicate source of truth.
-- No capability claim without matching evidence.
+## State
 
-Add project-specific non-goals only after they prevent a plausible wrong turn.
-
-## Product/control-plane boundary
-
-- Product source and deliverables: outside `for-ai/`; exact roots are
-  **Undecided until the first deliverable selects them**.
-- Agent orchestration and durable project memory: `for-ai/`.
-- Local generated diagnostics and scratch evidence: `.for-ai-local/` (ignored).
-
-## Architecture and ownership
-
-The implementation stack, modules, external contracts, and deployment surface
-are currently **Undecided**. Once selected, record only the top-level ownership
-map here and route detailed protocols to task-specific files.
-
-## Current verified state
-
-- Fresh Git repository initialized on 2026-10-02.
-- AI control plane created and mechanically checked.
-- No product implementation has been scaffolded.
-
-Git and runnable checks are the authority for branch, revision, and behavior.
-Do not turn this section into a second status ledger.
+The public repository was created 2026-10-02. Product source was migrated from the prior host project. Git, CI, and observed Windows/browser behavior determine verified status.
