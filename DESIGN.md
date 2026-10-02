@@ -12,6 +12,7 @@ The requested first release has:
 - pointer movement, left/right/middle clicks, scroll, and press/release for dragging;
 - two-way clipboard transfer during an authorized session;
 - a password prompt, one active controller, reconnect, and local Stop.
+- a revocable 24-hour access URL that opens the same companion without typing the main password.
 - phone controls for relative mouse mode, direct touch mode, click/drag, two-finger right click and view zoom/pan, three-finger scroll, view options, and an immersive/fullscreen viewer.
 
 The browser's lower toolbar follows the RustDesk phone interaction model without copying RustDesk artwork or source. Fit centers the full stream; Actual size renders one remote image pixel per browser CSS pixel; zoom and pinch keep their anchor in place and pan only where the image extends beyond the viewport. Direct touch maps to the visible image and ignores taps on letterboxing. Relative mouse movement uses the displayed image scale and pans a zoomed view to keep the cursor visible. The Full screen button uses the Fullscreen API where available and a fixed immersive layout otherwise. The current JPEG capture/WebRTC pipeline targets about 15 frames per second; it has not been measured against RustDesk latency.
@@ -22,7 +23,7 @@ General keyboard input, file transfer, audio, printing, terminal, tunneling, res
 
 ```text
 Phone or desktop browser: static HTTPS companion + pinned Ninja SDK
-                           | authenticated control channel in the password-derived room
+                           | authenticated control channel in a password- or invitation-derived room
                            | desktop video in a fresh room revealed after authorization
 VDO.Ninja-compatible signaling / STUN / optional TURN
                            |
@@ -39,9 +40,11 @@ The current package pins `@vdoninja/sdk` 1.6.1 and uses its documented signaling
 
 At local setup, generate a random 256-bit password (64 hexadecimal characters). The owner saves it in a password manager and types/pastes it into the browser for each session. The Windows host protects its copy with user-scoped [DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata) in its app-data directory. The room ID derives from the password, so the browser asks for only one value. This deliberately replaces the earlier OPAQUE plan and does not support a short, user-chosen password. The local **Replace password** action revokes access, writes a new DPAPI-protected password, and restarts the app to show/use the new value. Local Stop revokes the current session until the host restarts.
 
+The local **Create access link** action generates a separate 256-bit invitation secret in Rust and publishes a second blank control stream in a room derived from that secret. The URL points to the public Pages companion with an invitation ID and secret in its fragment, never in its query. The fragment is not part of the HTTP request, and the companion removes it from the address bar before joining the room. The browser uses the invitation secret for the same certificate-bound mutual proof and per-command MAC used by the generated password route. Rust holds only one invitation in memory and enforces an absolute deadline 24 hours after creation. Another link replaces it; **Revoke link**, Stop, password replacement, expiry, or app restart invalidate it and any invitation session. The main password remains valid when an invitation alone is revoked. The link is a bearer capability: anyone who obtains it before revocation can connect when the single-controller slot is free. No invitation secret is committed, stored on Pages, or written to browser storage.
+
 The password is supplied to the Ninja SDK for its signaling protection, but that alone does not authorize the desktop. Over the control data channel, browser and host exchange fresh nonces and prove possession of the generated password with HMAC-SHA-256 bound to the target, protocol version, and both WebRTC certificate fingerprints. Rust then derives a fresh media-room credential from the session key. The host sends no desktop pixels in the control room and starts the media stream only after this proof succeeds. Derive a separate per-session MAC key and require a sequence-numbered MAC on each mouse command. A captured proof cannot feasibly be brute-forced because the password is random and high-entropy; this design is unsuitable for a memorable password.
 
-Rust holds one control grant for at most 24 hours, tied to the authenticated peer and host generation. Every mouse or clipboard command checks that grant, its sequence number, the MAC, and bounds. Mouse commands reject a changed main-display size. Local Stop, password replacement, or disconnect revokes the grant and releases a held left button. There are no accounts, device records, or remembered-browser tokens in the first release. No password or grant appears in a URL, logs, or public assets.
+Rust holds one control grant for at most 24 hours, tied to the authenticated peer and host generation. An invitation grant cannot outlive its invitation. Every mouse or clipboard command checks that grant, its sequence number, the MAC, and bounds. Mouse commands reject a changed main-display size. Local Stop, password replacement, invitation revocation, expiry, or disconnect revokes the affected grant and releases a held left button. There are no accounts, device records, or remembered-browser tokens in the first release. The main password never appears in a URL, log, or public asset.
 
 ## Mouse contract
 

@@ -25,6 +25,15 @@ to rediscover. Source and tests remain the authority for implementation facts.
 - Consequences: Source and the companion page are public. Remote control still requires the host-generated password. Preserve the internal Tauri identifier so existing DPAPI data remains readable.
 - Supersedes: None
 
+## D-0003 — Temporary URL uses a separate in-memory invitation
+
+- Date: 2026-10-02
+- Status: Accepted
+- Context: The owner wants a URL that opens the browser companion directly for 24 hours, without exposing or rotating the durable access password at expiry.
+- Decision: Rust generates one 256-bit invitation at a time, publishes a separate VDO.Ninja control route, and validates its absolute 24-hour deadline on every command. Put bootstrap material in a URL fragment and clear it on load. Keep the invitation only in host memory.
+- Consequences: Local revoke or replacement invalidates the URL and its active grant. Restart also invalidates it, so links are valid for *up to* 24 hours while the app keeps running. Possession of the URL grants access during that window.
+- Supersedes: None
+
 ## Record format
 
 For later decisions, add one compact entry with:

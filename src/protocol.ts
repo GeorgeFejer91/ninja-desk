@@ -36,6 +36,20 @@ export async function roomFromPassword(password: string): Promise<string> {
   return (await sha256Hex(hexToBytes(password))).slice(0, 32);
 }
 
+export type AccessLinkSecret = { id: string; secret: string };
+
+export function parseAccessFragment(hash: string): AccessLinkSecret | null {
+  if (!hash.startsWith("#access=")) return null;
+  const match = /^#access=v1\.([0-9a-f]{32})\.([0-9a-f]{64})$/.exec(hash);
+  if (!match) throw new Error("Invalid access link");
+  return { id: match[1], secret: match[2] };
+}
+
+export async function routePasswordForAccessLink(secret: string): Promise<string> {
+  if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error("Invalid access link");
+  return hmacHex(hexToBytes(secret), "route|v1");
+}
+
 export function transcript(room: string, generation: string, peer: string, hostNonce: string, clientNonce: string, hostCert: string, clientCert: string): string {
   return `v1|${room}|${generation}|${peer}|${hostNonce}|${clientNonce}|${hostCert}|${clientCert}`;
 }
