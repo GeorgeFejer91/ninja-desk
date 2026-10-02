@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arboard::Clipboard;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
@@ -13,6 +13,7 @@ use windows_dpapi::{decrypt_data, encrypt_data, Scope};
 
 type HmacSha256 = Hmac<Sha256>;
 const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
+const ACCESS_LINK_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +44,14 @@ pub struct AuthResult {
     pub media_password: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLink {
+    pub id: String,
+    pub secret: String,
+    pub expires_at_ms: u64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MouseCommand {
@@ -70,19 +79,31 @@ struct Pending {
     host_cert: String,
     client_cert: String,
     started: Instant,
+    key: [u8; 32],
+    room: String,
+    invite_id: Option<String>,
 }
 
 struct Grant {
     peer: String,
     key: [u8; 32],
     seq: u64,
-    started: Instant,
+    expires: Instant,
+    invite_id: Option<String>,
     display: (i32, i32),
+}
+
+struct Invite {
+    id: String,
+    secret: [u8; 32],
+    room: String,
+    expires: Instant,
 }
 
 struct Inner {
     bootstrap: Bootstrap,
     secret: [u8; 32],
+    invite: Option<Invite>,
     pending: Option<Pending>,
     grant: Option<Grant>,
     mouse: Option<Enigo>,
@@ -102,6 +123,11 @@ fn hmac(key: &[u8], data: &str) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data.as_bytes());
     mac.finalize().into_bytes().into()
+}
+
+fn invite_room(secret: &[u8; 32]) -> String {
+    let route = hmac(secret, "route|v1");
+    hex::encode(Sha256::digest(route))[..32].to_owned()
 }
 
 fn valid_peer(peer: &str) -> bool {
@@ -158,6 +184,7 @@ impl Authority {
                 generation: random_hex(),
             },
             secret,
+            invite: None,
             pending: None,
             grant: None,
             mouse: None,
@@ -178,11 +205,61 @@ impl Authority {
         })
     }
 
+    pub fn create_access_link(&self) -> Result<AccessLink, String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        if !inner.available {
+            return Err("unavailable".into());
+        }
+        Self::clear_invite(&mut inner);
+        let secret = rand::random::<[u8; 32]>();
+        let id = random_hex();
+        let expires_at_ms = SystemTime::now()
+            .checked_add(ACCESS_LINK_LIFETIME)
+            .ok_or("state_error")?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "state_error")?
+            .as_millis() as u64;
+        inner.invite = Some(Invite {
+            id: id.clone(),
+            secret,
+            room: invite_room(&secret),
+            expires: Instant::now() + ACCESS_LINK_LIFETIME,
+        });
+        Ok(AccessLink {
+            id,
+            secret: hex::encode(secret),
+            expires_at_ms,
+        })
+    }
+
+    pub fn revoke_access_link(&self, id: &str) {
+        if let Ok(mut inner) = self.0.lock() {
+            if inner.invite.as_ref().is_some_and(|invite| invite.id == id) {
+                Self::clear_invite(&mut inner);
+            }
+        }
+    }
+
+    pub fn access_link_active(&self, id: &str) -> bool {
+        let Ok(mut inner) = self.0.lock() else {
+            return false;
+        };
+        if inner
+            .invite
+            .as_ref()
+            .is_some_and(|invite| Instant::now() >= invite.expires)
+        {
+            Self::clear_invite(&mut inner);
+        }
+        inner.available && inner.invite.as_ref().is_some_and(|invite| invite.id == id)
+    }
+
     pub fn begin_auth(
         &self,
         peer: String,
         host_cert: String,
         client_cert: String,
+        invite_id: Option<String>,
     ) -> Result<Challenge, String> {
         let valid_cert =
             |cert: &str| cert.len() == 64 && cert.bytes().all(|b| b.is_ascii_hexdigit());
@@ -193,6 +270,17 @@ impl Authority {
         if !inner.available || inner.grant.is_some() {
             return Err("unavailable".into());
         }
+        let (key, room) = match invite_id.as_deref() {
+            Some(id) => {
+                let invite = inner
+                    .invite
+                    .as_ref()
+                    .filter(|invite| invite.id == id && Instant::now() < invite.expires)
+                    .ok_or("invalid_link")?;
+                (invite.secret, invite.room.clone())
+            }
+            None => (inner.secret, inner.bootstrap.room.clone()),
+        };
         let nonce = random_hex();
         inner.pending = Some(Pending {
             peer,
@@ -200,6 +288,9 @@ impl Authority {
             host_cert: host_cert.clone(),
             client_cert: client_cert.clone(),
             started: Instant::now(),
+            key,
+            room,
+            invite_id,
         });
         Ok(Challenge {
             nonce,
@@ -214,6 +305,7 @@ impl Authority {
         peer: String,
         client_nonce: String,
         proof: String,
+        invite_id: Option<String>,
     ) -> Result<AuthResult, String> {
         if !valid_peer(&peer)
             || client_nonce.len() != 32
@@ -227,12 +319,26 @@ impl Authority {
             return Err("unavailable".into());
         }
         let pending = inner.pending.take().ok_or("invalid_auth")?;
-        if pending.peer != peer || pending.started.elapsed() > Duration::from_secs(30) {
+        if pending.peer != peer
+            || pending.invite_id != invite_id
+            || pending.started.elapsed() > Duration::from_secs(30)
+        {
             return Err("invalid_auth".into());
         }
+        let expires = match pending.invite_id.as_deref() {
+            Some(id) => {
+                inner
+                    .invite
+                    .as_ref()
+                    .filter(|invite| invite.id == id && Instant::now() < invite.expires)
+                    .ok_or("invalid_auth")?
+                    .expires
+            }
+            None => Instant::now() + ACCESS_LINK_LIFETIME,
+        };
         let transcript = format!(
             "v1|{}|{}|{}|{}|{}|{}|{}",
-            inner.bootstrap.room,
+            pending.room,
             inner.bootstrap.generation,
             peer,
             pending.nonce,
@@ -241,7 +347,7 @@ impl Authority {
             pending.client_cert
         );
         let supplied = hex::decode(proof).map_err(|_| "invalid_auth")?;
-        let mut verifier = HmacSha256::new_from_slice(&inner.secret).map_err(|_| "state_error")?;
+        let mut verifier = HmacSha256::new_from_slice(&pending.key).map_err(|_| "state_error")?;
         verifier.update(format!("client|{transcript}").as_bytes());
         verifier
             .verify_slice(&supplied)
@@ -250,15 +356,19 @@ impl Authority {
         let mouse = Enigo::new(&Settings::default()).map_err(|_| "mouse_unavailable")?;
         let display = mouse.main_display().map_err(|_| "display_unavailable")?;
         let cursor = mouse.location().unwrap_or((display.0 / 2, display.1 / 2));
-        let key = hmac(&inner.secret, &format!("session|{transcript}"));
-        let host_proof = hex::encode(hmac(&inner.secret, &format!("host|{transcript}")));
+        if Instant::now() >= expires {
+            return Err("invalid_auth".into());
+        }
+        let key = hmac(&pending.key, &format!("session|{transcript}"));
+        let host_proof = hex::encode(hmac(&pending.key, &format!("host|{transcript}")));
         let media_password = hex::encode(hmac(&key, "media|v1"));
         inner.mouse = Some(mouse);
         inner.grant = Some(Grant {
             peer,
             key,
             seq: 0,
-            started: Instant::now(),
+            expires,
+            invite_id,
             display,
         });
         inner.last_clipboard = None;
@@ -279,8 +389,15 @@ impl Authority {
         mac: &str,
         message: &str,
     ) -> Result<(), String> {
+        if inner
+            .grant
+            .as_ref()
+            .is_some_and(|grant| Instant::now() >= grant.expires)
+        {
+            Self::revoke(inner);
+        }
         let grant = inner.grant.as_mut().ok_or("unauthorized")?;
-        if grant.peer != peer || grant.started.elapsed() > Duration::from_secs(24 * 60 * 60) {
+        if grant.peer != peer {
             return Err("unauthorized".into());
         }
         if seq <= grant.seq {
@@ -399,6 +516,13 @@ impl Authority {
 
     pub fn read_clipboard(&self) -> Result<Option<String>, String> {
         let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        if inner
+            .grant
+            .as_ref()
+            .is_some_and(|grant| Instant::now() >= grant.expires)
+        {
+            Self::revoke(&mut inner);
+        }
         if inner.grant.is_none() {
             return Ok(None);
         }
@@ -422,7 +546,7 @@ impl Authority {
         if inner
             .grant
             .as_ref()
-            .is_some_and(|grant| grant.started.elapsed() > Duration::from_secs(24 * 60 * 60))
+            .is_some_and(|grant| Instant::now() >= grant.expires)
         {
             Self::revoke(&mut inner);
         }
@@ -440,6 +564,7 @@ impl Authority {
     pub fn stop(&self) {
         if let Ok(mut inner) = self.0.lock() {
             inner.available = false;
+            Self::clear_invite(&mut inner);
             Self::revoke(&mut inner);
         }
     }
@@ -447,6 +572,7 @@ impl Authority {
     pub fn replace_password(&self, data_dir: &Path) -> Result<(), String> {
         let mut inner = self.0.lock().map_err(|_| "state_error")?;
         inner.available = false;
+        Self::clear_invite(&mut inner);
         Self::revoke(&mut inner);
         let fresh = rand::random::<[u8; 32]>();
         let encrypted =
@@ -483,6 +609,25 @@ impl Authority {
         inner.mouse = None;
         inner.last_clipboard = None;
     }
+
+    fn clear_invite(inner: &mut Inner) {
+        let Some(invite) = inner.invite.take() else {
+            return;
+        };
+        if inner
+            .grant
+            .as_ref()
+            .is_some_and(|grant| grant.invite_id.as_deref() == Some(&invite.id))
+        {
+            Self::revoke(inner);
+        } else if inner
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.invite_id.as_deref() == Some(&invite.id))
+        {
+            inner.pending = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -495,15 +640,15 @@ mod tests {
         assert!(valid_peer("browser_1"));
         let authority = Authority::from_secret([7; 32]);
         assert!(authority
-            .begin_auth("../../x".into(), "0".repeat(64), "1".repeat(64))
+            .begin_auth("../../x".into(), "0".repeat(64), "1".repeat(64), None)
             .is_err());
         let challenge = authority
-            .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64))
+            .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64), None)
             .unwrap();
         assert_eq!(challenge.host_cert, "0".repeat(64));
         assert_eq!(challenge.client_cert, "1".repeat(64));
         assert!(authority
-            .finish_auth("browser_1".into(), "2".repeat(32), "3".repeat(64))
+            .finish_auth("browser_1".into(), "2".repeat(32), "3".repeat(64), None)
             .is_err());
     }
 
@@ -516,7 +661,8 @@ mod tests {
             peer: "browser_1".into(),
             key,
             seq: 0,
-            started: Instant::now(),
+            expires: Instant::now() + ACCESS_LINK_LIFETIME,
+            invite_id: None,
             display: (1920, 1080),
         });
         let message = "mouse|generation|browser_1|1|1|1|1|0";
@@ -536,7 +682,7 @@ mod tests {
         first.replace_password(&dir).unwrap();
         assert_eq!(
             first
-                .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64))
+                .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64), None)
                 .err()
                 .unwrap(),
             "unavailable"
@@ -545,5 +691,109 @@ mod tests {
         assert_ne!(restarted.bootstrap().unwrap().password, old_password);
         fs::remove_file(dir.join("access-secret.dpapi")).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn access_link_rotation_revoke_and_expiry() {
+        assert_eq!(invite_room(&[7; 32]), "d4887bf5fb730ab7ab254caa7cc25f57");
+        let authority = Authority::from_secret([7; 32]);
+        let first = authority.create_access_link().unwrap();
+        assert_eq!(first.id.len(), 32);
+        assert_eq!(first.secret.len(), 64);
+        assert!(authority.access_link_active(&first.id));
+        let challenge = authority
+            .begin_auth(
+                "browser_1".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                Some(first.id.clone()),
+            )
+            .unwrap();
+        let inner = authority.0.lock().unwrap();
+        let invite = inner.invite.as_ref().unwrap();
+        let secret: [u8; 32] = hex::decode(&first.secret).unwrap().try_into().unwrap();
+        assert_eq!(invite.room, invite_room(&secret));
+        assert_eq!(challenge.generation, inner.bootstrap.generation);
+        drop(inner);
+
+        let second = authority.create_access_link().unwrap();
+        assert_ne!(first.secret, second.secret);
+        assert!(!authority.access_link_active(&first.id));
+        assert!(authority
+            .finish_auth(
+                "browser_1".into(),
+                "2".repeat(32),
+                "3".repeat(64),
+                Some(first.id)
+            )
+            .is_err());
+        authority.revoke_access_link(&second.id);
+        assert!(!authority.access_link_active(&second.id));
+        assert!(authority
+            .begin_auth(
+                "browser_1".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                Some(second.id)
+            )
+            .is_err());
+
+        let third = authority.create_access_link().unwrap();
+        authority.0.lock().unwrap().invite.as_mut().unwrap().expires =
+            Instant::now() - Duration::from_secs(1);
+        assert!(!authority.access_link_active(&third.id));
+    }
+
+    #[test]
+    fn revoking_invitation_ends_only_its_grant() {
+        let authority = Authority::from_secret([7; 32]);
+        let link = authority.create_access_link().unwrap();
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "browser_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: Some(link.id.clone()),
+                display: (1920, 1080),
+            });
+        }
+        authority.revoke_access_link(&link.id);
+        assert!(authority.0.lock().unwrap().grant.is_none());
+
+        let another = authority.create_access_link().unwrap();
+        authority.0.lock().unwrap().grant = Some(Grant {
+            peer: "browser_2".into(),
+            key: [9; 32],
+            seq: 0,
+            expires: Instant::now() + ACCESS_LINK_LIFETIME,
+            invite_id: None,
+            display: (1920, 1080),
+        });
+        authority.revoke_access_link(&another.id);
+        assert_eq!(authority.active_peer().as_deref(), Some("browser_2"));
+    }
+
+    #[test]
+    fn expired_grant_rejects_signed_command() {
+        let authority = Authority::from_secret([7; 32]);
+        let mut inner = authority.0.lock().unwrap();
+        let key = [9; 32];
+        inner.grant = Some(Grant {
+            peer: "browser_1".into(),
+            key,
+            seq: 0,
+            expires: Instant::now() - Duration::from_secs(1),
+            invite_id: None,
+            display: (1920, 1080),
+        });
+        let message = "mouse|generation|browser_1|1|1|1|1|0";
+        let mac = hex::encode(hmac(&key, message));
+        assert_eq!(
+            Authority::verify(&mut inner, "browser_1", 1, &mac, message).unwrap_err(),
+            "unauthorized"
+        );
+        assert!(inner.grant.is_none());
     }
 }

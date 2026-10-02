@@ -4,7 +4,7 @@ Ninja Desk gives one owner live view, mouse control, and two-way text clipboard 
 
 ## Ownership
 
-- `src-tauri/`: Rust local authority, capture, password, session, mouse, clipboard.
+- `src-tauri/`: Rust local authority, capture, password, invitation, session, mouse, clipboard.
 - `src/` and root `index.html`: Tauri WebView, Ninja SDK adapter, shared protocol.
 - `companion/`: static browser UI. `vite.companion.config.ts` builds `companion-dist/`.
 - `branding/`: original transparent logo source and raster exports; `src-tauri/icons/` contains generated installer/app icons.
@@ -17,6 +17,7 @@ Ninja Desk gives one owner live view, mouse control, and two-way text clipboard 
 - Remote desktop authority remains in Rust. Never place credentials in Pages or Git.
 - Preserve Tauri identifier `dev.local.vdoninjaremote` through migration so existing Windows DPAPI app data remains accessible.
 - One controller, ordinary signed-in Windows desktop, primary display, text clipboard. See `DESIGN.md`.
+- One in-memory 24-hour invitation at a time; it opens the same public companion directly and is invalidated by expiry, local revoke, replacement, Stop, password replacement, or app restart. The main generated password remains available separately.
 - The browser companion's connected viewer fills the viewport and offers fullscreen/immersive viewing, fit/original-size zoom, and Mouse/Touch gestures. Its current capture target is about 15 fps; phone latency parity is unverified.
 - A successful build does not prove phone, cross-network, or end-to-end runtime behavior.
 - The earlier host and companion repositories are migration sources; this repository owns ongoing product work.

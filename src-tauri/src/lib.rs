@@ -1,7 +1,9 @@
 mod authority;
 mod screen;
 
-use authority::{AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, MouseCommand};
+use authority::{
+    AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, MouseCommand,
+};
 use tauri::{Manager, State};
 
 #[tauri::command]
@@ -15,8 +17,9 @@ fn begin_auth(
     peer: String,
     host_cert: String,
     client_cert: String,
+    invite_id: Option<String>,
 ) -> Result<Challenge, String> {
-    authority.begin_auth(peer, host_cert, client_cert)
+    authority.begin_auth(peer, host_cert, client_cert, invite_id)
 }
 
 #[tauri::command]
@@ -25,8 +28,24 @@ fn finish_auth(
     peer: String,
     client_nonce: String,
     proof: String,
+    invite_id: Option<String>,
 ) -> Result<AuthResult, String> {
-    authority.finish_auth(peer, client_nonce, proof)
+    authority.finish_auth(peer, client_nonce, proof, invite_id)
+}
+
+#[tauri::command]
+fn create_access_link(authority: State<'_, Authority>) -> Result<AccessLink, String> {
+    authority.create_access_link()
+}
+
+#[tauri::command]
+fn revoke_access_link(authority: State<'_, Authority>, id: String) {
+    authority.revoke_access_link(&id);
+}
+
+#[tauri::command]
+fn access_link_active(authority: State<'_, Authority>, id: String) -> bool {
+    authority.access_link_active(&id)
 }
 
 #[tauri::command]
@@ -85,6 +104,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            create_access_link,
+            revoke_access_link,
+            access_link_active,
             begin_auth,
             finish_auth,
             mouse,
