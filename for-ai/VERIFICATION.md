@@ -18,6 +18,7 @@ The bundled context checker needs PowerShell 7 (`pwsh`) here; Windows PowerShell
 npm ci
 npm run build
 npm run check:protocol
+npm run check:view
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo check --locked --manifest-path src-tauri/Cargo.toml
 cargo test --locked --manifest-path src-tauri/Cargo.toml

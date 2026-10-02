@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Ninja Desk</title>
     <link id="favicon" rel="icon" type="image/svg+xml" />
     <script type="module" src="/main.ts" defer></script>
@@ -22,8 +22,11 @@
       </form>
       <section id="session" hidden>
         <div class="session-bar">
-          <strong data-fit>Windows desktop</strong>
-          <button id="disconnect" type="button" data-fit>Disconnect</button>
+          <div class="session-title"><strong data-fit>Windows desktop</strong><span id="session-status" data-fit role="status">Connected</span></div>
+          <div class="session-actions">
+            <button id="fullscreen" type="button" aria-label="Full screen" title="Full screen" aria-pressed="false"><span aria-hidden="true">⛶</span><span class="desktop-label" data-fit>Full screen</span></button>
+            <button id="disconnect" type="button" aria-label="Disconnect" title="Disconnect"><span aria-hidden="true">×</span><span class="desktop-label" data-fit>Disconnect</span></button>
+          </div>
         </div>
         <div class="screen-wrap" id="screen-wrap" aria-label="Remote desktop touch area">
           <video id="screen" autoplay playsinline muted aria-label="Windows desktop"></video>
@@ -44,7 +47,7 @@
           <output id="zoom-level" aria-live="polite">100%</output>
           <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
           <button id="reset-view" type="button" data-fit>Reset view</button>
-          <p class="gesture-help">Mouse mode: drag a finger to move the pointer, tap to click. Touch mode: tap or drag directly. Double tap and hold to drag in mouse mode. Two fingers tap for right click; pinch to zoom; three fingers drag to scroll.</p>
+          <p class="gesture-help">Mouse mode: drag to move the pointer, tap to click, or double tap and hold to drag. Touch mode: tap or drag directly. Two-finger tap: right click. Pinch: zoom and pan. Three-finger drag: scroll. Ctrl + wheel: zoom.</p>
         </div>
         <section id="clipboard" class="clipboard" aria-labelledby="clipboard-heading" hidden>
           <h2 id="clipboard-heading" data-fit>Clipboard</h2>

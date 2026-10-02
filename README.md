@@ -11,7 +11,7 @@ The browser page is public. The desktop stream and commands require the random p
 1. Download the `ninja-desk-windows-installer` artifact from the latest successful [Windows installer workflow](https://github.com/GeorgeFejer91/ninja-desk/actions/workflows/windows-installer.yml) and run the NSIS setup on Windows 10/11. The installer is unsigned, so Windows may show a publisher warning.
 2. Launch **Ninja Desk** while signed in. Save its generated 64-character password in a password manager.
 3. Open the [browser companion](https://georgefejer91.github.io/ninja-desk/) on a phone or another browser. Enter the password. Keep the host app running and the PC awake.
-4. Use Mouse or Touch mode for movement and clicks. The toolbar provides right click, scrolling, display controls, and text clipboard transfer. **Stop remote access** revokes the session. **Replace password** saves a new credential and restarts the host automatically.
+4. The connected viewer fills the browser window. Use **Full screen** to hide browser chrome where the browser permits it; the app uses an immersive page layout otherwise. The lower toolbar switches Mouse and Touch modes and opens Display and Clipboard controls. Display offers fit, original size, zoom, and reset. In Mouse mode, drag to move the pointer and tap to click; a zoomed view follows the pointer. In Touch mode, tap or drag on the desktop directly. Pinch to zoom and pan, two-finger tap for right click, and three-finger drag to scroll. **Stop remote access** revokes the session. **Replace password** saves a new credential and restarts the host automatically.
 
 One controller can connect at a time. The connection uses VDO.Ninja signaling and may need a working WebRTC route or TURN relay. Browser clipboard permissions may require a user action, especially on phones.
 
@@ -23,6 +23,7 @@ Install Node.js 24, Rust stable with the Windows MSVC toolchain, and the Tauri v
 npm ci
 npm run build
 npm run check:protocol
+npm run check:view
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run tauri build -- --bundles nsis
 ```
@@ -39,4 +40,4 @@ The installer appears in `src-tauri/target/release/bundle/nsis/`. The [Pages wor
 | `for-ai/` | Agent orchestration and verification |
 | `DESIGN.md` | Product scope, protocol, and acceptance criteria |
 
-The core path was exercised from a browser on the Windows host. A physical phone, another network, long sessions, and installer execution are not yet qualified. Capture uses the primary display. UAC/lock screen, general keyboard input, file transfer, audio, and full RustDesk settings parity are outside the current implementation.
+The core path was exercised from a browser on the Windows host. A physical phone, another network, long sessions, and installer execution are not yet qualified. Capture uses the primary display and currently targets about 15 frames per second; RustDesk-level video latency and smoothness are not established. Browser fullscreen support varies, especially on phones, so the immersive fallback may leave browser bars visible. UAC/lock screen, general keyboard input, file transfer, audio, and full RustDesk settings parity are outside the current implementation.

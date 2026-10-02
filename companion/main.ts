@@ -3,6 +3,7 @@ import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
 import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, roomFromPassword, transcript } from "../src/protocol";
 import { watchTextFit } from "../src/text-fit";
+import { clampPan, followPoint, imageRect, relativePoint, screenPoint, zoomPan, type View } from "./view-geometry";
 import "./style.css";
 
 const form = document.querySelector<HTMLFormElement>("#connect-form")!;
@@ -15,6 +16,8 @@ const video = document.querySelector<HTMLVideoElement>("#screen")!;
 const modeButton = document.querySelector<HTMLButtonElement>("#mode")!;
 const viewOptions = document.querySelector<HTMLElement>("#view-options")!;
 const displayButton = document.querySelector<HTMLButtonElement>("#display-options")!;
+const fullscreenButton = document.querySelector<HTMLButtonElement>("#fullscreen")!;
+const sessionStatus = document.querySelector<HTMLElement>("#session-status")!;
 const clipboardPanel = document.querySelector<HTMLElement>("#clipboard")!;
 const clipboardButton = document.querySelector<HTMLButtonElement>("#clipboard-toggle")!;
 const remoteText = document.querySelector<HTMLTextAreaElement>("#remote-text")!;
@@ -41,11 +44,11 @@ let queuedMoves = 0;
 let commandQueue: Promise<void> = Promise.resolve();
 let lastPosition = { x: 32768, y: 32768 };
 let inputMode: "mouse" | "touch" = "mouse";
-let touchStart: { x: number; y: number; time: number; secondTap: boolean; consumed: boolean } | null = null;
+let touchStart: { x: number; y: number; time: number; secondTap: boolean; consumed: boolean; directValid: boolean } | null = null;
 let touchHold: number | null = null;
 let lastTap: { x: number; y: number; time: number } | null = null;
 const touches = new Map<number, { x: number; y: number }>();
-let multi: { time: number; x: number; y: number; distance: number; scale: number; panX: number; panY: number; moved: boolean } | null = null;
+let multi: { time: number; x: number; y: number; distance: number; scale: number; panX: number; panY: number; moved: boolean; directValid: boolean } | null = null;
 let threeY: number | null = null;
 let suppressTouch = false;
 let leftHeld = false;
@@ -53,9 +56,12 @@ let viewScale = 1;
 let panX = 0;
 let panY = 0;
 let connectionTimer: number | null = null;
+let immersiveFallback = false;
+const maxZoom = 32;
 
 function setStatus(message: string) {
   status.textContent = message;
+  sessionStatus.textContent = message;
   console.info(`[client] ${message}`);
 }
 
@@ -65,6 +71,9 @@ function safeError(error: unknown): string {
 
 function resetConnection(message: string) {
   cancelTouch();
+  if (document.fullscreenElement === session) void document.exitFullscreen().catch(() => {});
+  immersiveFallback = false;
+  syncFullscreen();
   if (connectionTimer !== null) clearTimeout(connectionTimer);
   connectionTimer = null;
   const previous = sdk;
@@ -83,7 +92,13 @@ function resetConnection(message: string) {
   panY = 0;
   applyView();
   remoteText.value = "";
+  localText.value = "";
+  viewOptions.hidden = true;
+  clipboardPanel.hidden = true;
+  displayButton.setAttribute("aria-expanded", "false");
+  clipboardButton.setAttribute("aria-expanded", "false");
   session.hidden = true;
+  document.body.classList.remove("in-session");
   form.hidden = false;
   connectButton.disabled = false;
   setStatus(message);
@@ -105,6 +120,7 @@ async function startMedia(password: string) {
       connectButton.disabled = false;
       form.hidden = true;
       session.hidden = false;
+      document.body.classList.add("in-session");
       setStatus("Connected");
       void video.play().catch(() => setStatus("Tap the screen to start video"));
     });
@@ -157,17 +173,18 @@ function queueClipboard(text: string) {
   }).catch(() => setStatus("Connection interrupted"));
 }
 
-function point(event: PointerEvent | WheelEvent): { x: number; y: number } | null {
-  if (!video.videoWidth || !video.videoHeight) return null;
-  const rect = video.getBoundingClientRect();
-  const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
-  const width = video.videoWidth * scale;
-  const height = video.videoHeight * scale;
-  const left = rect.left + (rect.width - width) / 2;
-  const top = rect.top + (rect.height - height) / 2;
-  const x = Math.max(0, Math.min(1, (event.clientX - left) / width));
-  const y = Math.max(0, Math.min(1, (event.clientY - top) / height));
-  return { x: Math.round(x * 65535), y: Math.round(y * 65535) };
+function view(): View {
+  return { width: screenWrap.clientWidth, height: screenWrap.clientHeight, videoWidth: video.videoWidth, videoHeight: video.videoHeight, scale: viewScale, panX, panY };
+}
+
+function localPoint(event: PointerEvent | WheelEvent) {
+  const rect = screenWrap.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function point(event: PointerEvent | WheelEvent, allowOutside = false): { x: number; y: number } | null {
+  const local = localPoint(event);
+  return screenPoint(view(), local.x, local.y, allowOutside);
 }
 
 async function handleData(uuid: string, data: unknown) {
@@ -295,13 +312,55 @@ form.addEventListener("submit", async (event) => {
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }
 
 function applyView() {
-  const width = screenWrap.clientWidth;
-  const height = screenWrap.clientHeight;
-  panX = clamp(panX, -(viewScale - 1) * width / 2, (viewScale - 1) * width / 2);
-  panY = clamp(panY, -(viewScale - 1) * height / 2, (viewScale - 1) * height / 2);
+  const pan = clampPan(view());
+  panX = pan.x;
+  panY = pan.y;
   video.style.transform = `translate(${panX}px, ${panY}px) scale(${viewScale})`;
   document.querySelector<HTMLOutputElement>("#zoom-level")!.value = `${Math.round(viewScale * 100)}%`;
+  document.querySelector<HTMLButtonElement>("#fit-view")!.setAttribute("aria-pressed", String(viewScale === 1 && panX === 0 && panY === 0));
 }
+
+function zoomAt(scale: number, x = screenWrap.clientWidth / 2, y = screenWrap.clientHeight / 2) {
+  const pan = zoomPan(view(), clamp(scale, 1, maxZoom), x, y);
+  viewScale = clamp(scale, 1, maxZoom);
+  panX = pan.x;
+  panY = pan.y;
+  applyView();
+}
+
+function syncFullscreen() {
+  const active = document.fullscreenElement === session || immersiveFallback;
+  session.classList.toggle("immersive-fallback", immersiveFallback);
+  document.body.classList.toggle("immersive", immersiveFallback);
+  const label = active ? "Exit full screen" : "Full screen";
+  fullscreenButton.querySelector<HTMLElement>(".desktop-label")!.textContent = label;
+  fullscreenButton.setAttribute("aria-label", label);
+  fullscreenButton.title = label;
+  fullscreenButton.setAttribute("aria-pressed", String(active));
+  requestAnimationFrame(applyView);
+}
+
+fullscreenButton.addEventListener("click", async () => {
+  if (document.fullscreenElement === session) {
+    await document.exitFullscreen().catch(() => {});
+  } else if (immersiveFallback) {
+    immersiveFallback = false;
+  } else {
+    try {
+      if (!session.requestFullscreen) throw new Error("Fullscreen unavailable");
+      await session.requestFullscreen();
+    } catch {
+      immersiveFallback = true;
+    }
+  }
+  syncFullscreen();
+});
+document.addEventListener("fullscreenchange", syncFullscreen);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && immersiveFallback) { immersiveFallback = false; syncFullscreen(); }
+});
+video.addEventListener("loadedmetadata", applyView);
+new ResizeObserver(applyView).observe(screenWrap);
 
 function clearHold() {
   if (touchHold !== null) clearTimeout(touchHold);
@@ -324,18 +383,20 @@ function cancelTouch() {
   suppressTouch = false;
 }
 
-function moveAbsolute(event: PointerEvent) {
-  const position = point(event);
+function moveAbsolute(event: PointerEvent, allowOutside = false) {
+  const position = point(event, allowOutside);
   if (position) { lastPosition = position; queueMouse(1, position.x, position.y); }
 }
 
 function moveRelative(dx: number, dy: number) {
-  const rect = video.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
-  lastPosition = {
-    x: clamp(Math.round(lastPosition.x + dx * 65535 / rect.width), 0, 65535),
-    y: clamp(Math.round(lastPosition.y + dy * 65535 / rect.height), 0, 65535),
-  };
+  if (!imageRect(view()).width) return;
+  lastPosition = relativePoint(view(), lastPosition.x, lastPosition.y, dx, dy);
+  if (viewScale > 1) {
+    const pan = followPoint(view(), lastPosition.x, lastPosition.y);
+    panX = pan.x;
+    panY = pan.y;
+    applyView();
+  }
   queueMouse(1, lastPosition.x, lastPosition.y);
 }
 
@@ -350,9 +411,15 @@ function touchGeometry() {
 screenWrap.addEventListener("contextmenu", (event) => event.preventDefault());
 screenWrap.addEventListener("pointerdown", (event) => {
   if (!sessionKey) return;
+  if (video.paused && video.srcObject) {
+    event.preventDefault();
+    void video.play().then(() => setStatus("Connected")).catch(() => setStatus("Could not start video"));
+    return;
+  }
   event.preventDefault();
   screenWrap.setPointerCapture(event.pointerId);
   if (event.pointerType !== "touch") {
+    if (!point(event)) return;
     moveAbsolute(event);
     if (event.button === 0) { leftHeld = true; queueMouse(2); }
     else if (event.button === 1) queueMouse(6);
@@ -364,21 +431,23 @@ screenWrap.addEventListener("pointerdown", (event) => {
   if (touches.size === 1) {
     const time = performance.now();
     const secondTap = !!lastTap && time - lastTap.time < 330 && Math.hypot(event.clientX - lastTap.x, event.clientY - lastTap.y) < 28;
-    touchStart = { x: event.clientX, y: event.clientY, time, secondTap, consumed: false };
-    if (inputMode === "touch") moveAbsolute(event);
+    const directValid = inputMode !== "touch" || !!point(event);
+    touchStart = { x: event.clientX, y: event.clientY, time, secondTap, consumed: false, directValid };
+    if (inputMode === "touch" && directValid) moveAbsolute(event);
     touchHold = window.setTimeout(() => {
-      if (!touchStart || touches.size !== 1 || suppressTouch) return;
+      if (!touchStart || !touchStart.directValid || touches.size !== 1 || suppressTouch) return;
       if (touchStart.secondTap) { touchStart.consumed = true; leftHeld = true; queueMouse(2); }
       else { touchStart.consumed = true; queueMouse(5); }
     }, secondTap ? 280 : 560);
     return;
   }
   releaseLeft();
+  const directValid = touchStart?.directValid ?? false;
   touchStart = null;
   suppressTouch = true;
   if (touches.size === 2) {
     const geometry = touchGeometry();
-    multi = { time: performance.now(), ...geometry, scale: viewScale, panX, panY, moved: false };
+    multi = { time: performance.now(), ...geometry, scale: viewScale, panX, panY, moved: false, directValid };
   } else {
     multi = null;
     if (touches.size === 3) threeY = touchGeometry().y;
@@ -387,7 +456,7 @@ screenWrap.addEventListener("pointerdown", (event) => {
 
 screenWrap.addEventListener("pointermove", (event) => {
   if (!sessionKey) return;
-  if (event.pointerType !== "touch") { moveAbsolute(event); return; }
+  if (event.pointerType !== "touch") { moveAbsolute(event, leftHeld); return; }
   const previous = touches.get(event.pointerId);
   if (!previous) return;
   touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -403,9 +472,12 @@ screenWrap.addEventListener("pointermove", (event) => {
   if (touches.size === 2 && multi) {
     const current = touchGeometry();
     if (Math.hypot(current.x - multi.x, current.y - multi.y) > 9 || Math.abs(current.distance - multi.distance) > 9) multi.moved = true;
-    viewScale = clamp(multi.scale * current.distance / Math.max(1, multi.distance), 1, 4);
-    panX = multi.panX + current.x - multi.x;
-    panY = multi.panY + current.y - multi.y;
+    const rect = screenWrap.getBoundingClientRect();
+    const startView = { ...view(), scale: multi.scale, panX: multi.panX, panY: multi.panY };
+    viewScale = clamp(multi.scale * current.distance / Math.max(1, multi.distance), 1, maxZoom);
+    const pan = zoomPan(startView, viewScale, multi.x - rect.left, multi.y - rect.top, current.x - rect.left, current.y - rect.top);
+    panX = pan.x;
+    panY = pan.y;
     applyView();
     return;
   }
@@ -413,12 +485,13 @@ screenWrap.addEventListener("pointermove", (event) => {
   const distance = Math.hypot(event.clientX - touchStart.x, event.clientY - touchStart.y);
   if (distance > 9) {
     clearHold();
-    if (inputMode === "touch" && !leftHeld) { leftHeld = true; queueMouse(2); }
+    if (inputMode === "touch" && touchStart.directValid && !leftHeld) { leftHeld = true; queueMouse(2); }
     if (inputMode === "mouse" && touchStart.secondTap && !leftHeld) { leftHeld = true; queueMouse(2); }
     touchStart.consumed = true;
   }
-  if (inputMode === "touch") moveAbsolute(event);
-  else moveRelative(event.clientX - previous.x, event.clientY - previous.y);
+  if (inputMode === "touch") {
+    if (touchStart.directValid) moveAbsolute(event, true);
+  } else moveRelative(event.clientX - previous.x, event.clientY - previous.y);
 });
 
 function finishPointer(event: PointerEvent) {
@@ -427,15 +500,17 @@ function finishPointer(event: PointerEvent) {
   const count = touches.size;
   touches.delete(event.pointerId);
   clearHold();
-  if (count === 2 && multi && !multi.moved && performance.now() - multi.time < 330 && event.type === "pointerup") queueMouse(5);
+  if (count === 2 && multi && (inputMode === "mouse" || multi.directValid) && !multi.moved && performance.now() - multi.time < 330 && event.type === "pointerup") queueMouse(5);
   if (count > 1) { multi = null; threeY = null; releaseLeft(); }
   if (touches.size) return;
   if (!suppressTouch && touchStart && event.type === "pointerup") {
     const distance = Math.hypot(event.clientX - touchStart.x, event.clientY - touchStart.y);
     if (!touchStart.consumed && distance < 12 && performance.now() - touchStart.time < 500) {
-      if (inputMode === "touch") moveAbsolute(event);
-      queueMouse(4);
-      lastTap = { x: event.clientX, y: event.clientY, time: performance.now() };
+      if (inputMode === "touch" && touchStart.directValid) moveAbsolute(event, true);
+      if (touchStart.directValid) {
+        queueMouse(4);
+        lastTap = { x: event.clientX, y: event.clientY, time: performance.now() };
+      }
     }
   }
   releaseLeft();
@@ -446,6 +521,11 @@ screenWrap.addEventListener("pointerup", finishPointer);
 screenWrap.addEventListener("pointercancel", finishPointer);
 screenWrap.addEventListener("wheel", (event) => {
   event.preventDefault();
+  if (event.ctrlKey || event.metaKey) {
+    const local = localPoint(event);
+    zoomAt(viewScale * (event.deltaY < 0 ? 1.15 : 1 / 1.15), local.x, local.y);
+    return;
+  }
   const position = point(event);
   if (position) lastPosition = position;
   queueMouse(event.shiftKey ? 8 : 7, lastPosition.x, lastPosition.y, Math.sign(event.deltaY));
@@ -461,21 +541,25 @@ modeButton.addEventListener("click", () => {
   modeButton.setAttribute("aria-label", `Input mode: ${inputMode}`);
 });
 displayButton.addEventListener("click", () => {
+  clipboardPanel.hidden = true;
+  clipboardButton.setAttribute("aria-expanded", "false");
   viewOptions.hidden = !viewOptions.hidden;
   displayButton.setAttribute("aria-expanded", String(!viewOptions.hidden));
 });
 clipboardButton.addEventListener("click", () => {
+  viewOptions.hidden = true;
+  displayButton.setAttribute("aria-expanded", "false");
   clipboardPanel.hidden = !clipboardPanel.hidden;
   clipboardButton.setAttribute("aria-expanded", String(!clipboardPanel.hidden));
 });
 document.querySelector("#fit-view")!.addEventListener("click", () => { viewScale = 1; panX = 0; panY = 0; applyView(); });
 document.querySelector("#actual-view")!.addEventListener("click", () => {
   if (!video.videoWidth || !video.videoHeight) return;
-  viewScale = clamp(Math.max(video.videoWidth / screenWrap.clientWidth, video.videoHeight / screenWrap.clientHeight), 1, 4);
+  viewScale = clamp(Math.max(video.videoWidth / screenWrap.clientWidth, video.videoHeight / screenWrap.clientHeight), 1, maxZoom);
   panX = 0; panY = 0; applyView();
 });
-document.querySelector("#zoom-out")!.addEventListener("click", () => { viewScale = clamp(viewScale / 1.25, 1, 4); applyView(); });
-document.querySelector("#zoom-in")!.addEventListener("click", () => { viewScale = clamp(viewScale * 1.25, 1, 4); applyView(); });
+document.querySelector("#zoom-out")!.addEventListener("click", () => zoomAt(viewScale / 1.25));
+document.querySelector("#zoom-in")!.addEventListener("click", () => zoomAt(viewScale * 1.25));
 document.querySelector("#reset-view")!.addEventListener("click", () => { viewScale = 1; panX = 0; panY = 0; applyView(); });
 
 document.querySelector("#right-click")!.addEventListener("click", () => queueMouse(5));

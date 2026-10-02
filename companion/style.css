@@ -3,39 +3,63 @@
 [hidden] { display: none !important; }
 
 .companion-layout { max-width: 1240px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
-.companion-header, .session-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.companion-header { border-bottom: 1px solid #e7e5e4; padding-bottom: 12px; }
-#status { color: #57534e; text-align: right; }
+.companion-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid #e7e5e4; padding-bottom: 12px; }
+#status { min-width: 0; color: #57534e; text-align: right; }
 .connect-form { display: grid; gap: 8px; max-width: 640px; }
 .connect-row, .clipboard-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .connect-row input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid #d6d3d1; border-radius: 6px; }
-#session { min-width: 0; display: grid; gap: 8px; }
-.session-bar strong { font-weight: 600; }
-.session-bar button { min-height: 34px; padding: 5px 10px; }
-.screen-wrap { position: relative; width: 100%; height: min(70vh, 760px); min-height: 240px; background: #141414; border: 1px solid #57534e; overflow: hidden; touch-action: none; cursor: crosshair; }
+
+body.in-session { overflow: hidden; background: #101010; }
+.in-session .companion-layout { width: 100%; max-width: none; height: 100dvh; min-height: 0; margin: 0; padding: 0; gap: 0; grid-template-rows: minmax(0, 1fr); }
+.in-session .companion-header, .in-session .connect-form { display: none; }
+#session { position: relative; min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; color: #f5f5f4; background: #101010; }
+.session-bar, .session-toolbar { z-index: 2; background: #242321; }
+.session-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left)); border-bottom: 1px solid #44403c; }
+.session-title { min-width: 0; display: grid; gap: 1px; }
+.session-title strong { font-weight: 600; font-size: 14px; line-height: 19px; }
+#session-status { min-width: 0; color: #d6d3d1; font-size: 12px; line-height: 16px; }
+.session-actions { flex: none; display: flex; gap: 6px; }
+.session-actions button, .session-toolbar button, .view-options button, .clipboard button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; border-color: #57534e; color: #f5f5f4; background: #343230; }
+.session-actions button:hover, .session-toolbar button:hover, .view-options button:hover, .clipboard button:hover { background: #44403c; }
+.session-actions button { padding: 6px 10px; }
+.session-actions button > span:first-child { font-size: 20px; line-height: 20px; }
+.session-actions .desktop-label { display: inline-block; }
+.screen-wrap { position: relative; width: 100%; min-height: 0; background: #101010; overflow: hidden; touch-action: none; cursor: crosshair; }
 #screen { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; transform-origin: center; }
-.session-toolbar, .view-options { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.session-toolbar button, .view-options button { min-height: 36px; padding: 6px 10px; }
-.session-toolbar button[data-mode] { background: #183b49; color: #fff; border-color: #183b49; }
-.view-options { border: 1px solid #d6d3d1; border-radius: 6px; background: #fff; padding: 10px; }
+.session-toolbar { display: flex; gap: 6px; align-items: center; justify-content: center; flex-wrap: wrap; padding: 7px max(12px, env(safe-area-inset-right)) max(7px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); border-top: 1px solid #44403c; }
+.session-toolbar button[data-mode] { background: #8e4716; border-color: #a85a23; color: #fff; }
+.session-toolbar button[data-mode]:hover { background: #a85a23; }
+.view-options, .clipboard { position: absolute; z-index: 3; left: max(12px, env(safe-area-inset-left)); bottom: calc(62px + env(safe-area-inset-bottom)); width: min(680px, calc(100% - 24px)); max-height: calc(100% - 130px); overflow: auto; border: 1px solid #57534e; border-radius: 6px; background: #242321; box-shadow: 0 8px 24px #0008; padding: 12px; }
+.view-options { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .view-options > span { font-weight: 600; margin-right: 4px; }
-#zoom-level { min-width: 42px; text-align: center; }
-.gesture-help { flex-basis: 100%; margin: 4px 0 0; font-size: 12px; line-height: 18px; }
-.clipboard { border-top: 1px solid #e7e5e4; padding-top: 16px; max-width: 700px; display: grid; gap: 8px; }
+.view-options #fit-view { min-width: 54px; }
+#zoom-level { min-width: 48px; text-align: center; }
+.gesture-help { flex-basis: 100%; margin: 6px 0 0; color: #d6d3d1; font-size: 12px; line-height: 18px; }
+.clipboard { max-width: 520px; display: grid; gap: 8px; }
 .clipboard h2 { margin-bottom: 0; }
-.clipboard textarea { width: 100%; min-width: 0; resize: vertical; padding: 10px; font: inherit; border: 1px solid #d6d3d1; border-radius: 6px; background: #fff; }
+.clipboard textarea { width: 100%; min-width: 0; resize: vertical; padding: 10px; font: inherit; border: 1px solid #78716c; border-radius: 6px; color: #1c1917; background: #fff; }
 .clipboard button { justify-self: start; }
-.clipboard label:not(:first-of-type) { margin-top: 12px; }
+.clipboard #copy-remote { min-width: 160px; }
+.clipboard #send-local { min-width: 130px; }
+.clipboard label:not(:first-of-type) { margin-top: 8px; }
+
+#session:fullscreen, #session.immersive-fallback { width: 100%; height: 100dvh; background: #101010; }
+#session.immersive-fallback { position: fixed; inset: 0; z-index: 1000; }
+body.immersive { overflow: hidden; }
+#session:is(:fullscreen, .immersive-fallback) .screen-wrap { position: absolute; inset: 0; width: 100%; height: 100%; }
+#session:is(:fullscreen, .immersive-fallback) .session-bar { position: absolute; top: 0; left: 0; right: 0; background: #242321e8; }
+#session:is(:fullscreen, .immersive-fallback) .session-toolbar { position: absolute; bottom: 0; left: 0; right: 0; background: #242321e8; }
 
 @media (max-width: 600px) {
   .companion-layout { padding: 8px; gap: 8px; }
   .companion-header { display: grid; gap: 2px; }
   #status { text-align: left; font-size: 12px; }
   .connect-row input { flex-basis: 100%; }
-  .screen-wrap { height: calc(100dvh - 166px); min-height: 260px; }
+  .session-actions button { width: 42px; padding: 5px; }
+  .session-actions .desktop-label { display: none; }
   .session-toolbar { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  .session-toolbar button { min-width: 0; min-height: 42px; padding: 5px 3px; font-size: 11px; line-height: 14px; }
+  .session-toolbar button { min-width: 0; min-height: 42px; padding: 5px 3px; font-size: 12px; line-height: 16px; }
   .session-toolbar button:first-child, .session-toolbar button:nth-child(2) { grid-column: span 2; }
-  .session-toolbar button:nth-child(3), .session-toolbar button:nth-child(4) { grid-column: span 1; }
   .session-toolbar button:nth-child(5), .session-toolbar button:nth-child(6) { grid-column: span 3; }
+  .view-options, .clipboard { bottom: calc(109px + env(safe-area-inset-bottom)); max-height: calc(100% - 175px); }
 }

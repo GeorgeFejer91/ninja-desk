@@ -12,7 +12,9 @@ The requested first release has:
 - pointer movement, left/right/middle clicks, scroll, and press/release for dragging;
 - two-way clipboard transfer during an authorized session;
 - a password prompt, one active controller, reconnect, and local Stop.
-- phone controls for relative mouse mode, direct touch mode, click/drag, two-finger right click and view zoom/pan, three-finger scroll, and view options.
+- phone controls for relative mouse mode, direct touch mode, click/drag, two-finger right click and view zoom/pan, three-finger scroll, view options, and an immersive/fullscreen viewer.
+
+The browser's lower toolbar follows the RustDesk phone interaction model without copying RustDesk artwork or source. Fit centers the full stream; Actual size renders one remote image pixel per browser CSS pixel; zoom and pinch keep their anchor in place and pan only where the image extends beyond the viewport. Direct touch maps to the visible image and ignores taps on letterboxing. Relative mouse movement uses the displayed image scale and pans a zoomed view to keep the cursor visible. The Full screen button uses the Fullscreen API where available and a fixed immersive layout otherwise. The current JPEG capture/WebRTC pipeline targets about 15 frames per second; it has not been measured against RustDesk latency.
 
 General keyboard input, file transfer, audio, printing, terminal, tunneling, restart, privacy mode, and RustDesk account/server functions are not yet implemented. The user has asked for RustDesk-like phone navigation; this prototype implements the controls that map to its screen, mouse, and clipboard backend. Full RustDesk layout/settings parity is not yet achieved.
 
