@@ -9,6 +9,9 @@ use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
 use windows_dpapi::{decrypt_data, encrypt_data, Scope};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -138,19 +141,48 @@ fn valid_peer(peer: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn secret_path(data_dir: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        data_dir.join("access-secret.dpapi")
+    }
+    #[cfg(unix)]
+    {
+        data_dir.join("access-secret.bin")
+    }
+}
+
+fn encode_secret(secret: &[u8; 32]) -> Result<Vec<u8>, String> {
+    #[cfg(windows)]
+    {
+        encrypt_data(secret, Scope::User, None).map_err(|_| "secret_store_failed".into())
+    }
+    #[cfg(unix)]
+    {
+        Ok(secret.to_vec())
+    }
+}
+
+fn secret_file() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
 impl Authority {
     pub fn load(data_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_dir).map_err(|_| "secret_store_failed")?;
-        let path = data_dir.join("access-secret.dpapi");
+        let path = secret_path(data_dir);
         let secret = if path.exists() {
             Self::read_secret(&path)?
         } else {
             let fresh = rand::random::<[u8; 32]>();
-            let encrypted =
-                encrypt_data(&fresh, Scope::User, None).map_err(|_| "secret_store_failed")?;
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            let encoded = encode_secret(&fresh)?;
+            match secret_file().open(&path) {
                 Ok(mut file) => {
-                    file.write_all(&encrypted)
+                    file.write_all(&encoded)
                         .map_err(|_| "secret_store_failed")?;
                     file.sync_all().map_err(|_| "secret_store_failed")?;
                     fresh
@@ -165,12 +197,22 @@ impl Authority {
     }
 
     fn read_secret(path: &Path) -> Result<[u8; 32], String> {
+        #[cfg(unix)]
+        {
+            let metadata = fs::symlink_metadata(path).map_err(|_| "secret_store_failed")?;
+            if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+                return Err("secret_store_invalid".into());
+            }
+        }
         let encrypted = fs::read(path).map_err(|_| "secret_store_failed")?;
         if encrypted.is_empty() || encrypted.len() > 4096 {
             return Err("secret_store_invalid".into());
         }
+        #[cfg(windows)]
         let raw =
             decrypt_data(&encrypted, Scope::User, None).map_err(|_| "secret_store_invalid")?;
+        #[cfg(unix)]
+        let raw = encrypted;
         raw.try_into().map_err(|_| "secret_store_invalid".into())
     }
 
@@ -575,17 +617,14 @@ impl Authority {
         Self::clear_invite(&mut inner);
         Self::revoke(&mut inner);
         let fresh = rand::random::<[u8; 32]>();
-        let encrypted =
-            encrypt_data(&fresh, Scope::User, None).map_err(|_| "secret_store_failed")?;
-        let temp = data_dir.join(format!("access-secret-{}.dpapi", random_hex()));
-        let path = data_dir.join("access-secret.dpapi");
+        let encoded = encode_secret(&fresh)?;
+        let temp = data_dir.join(format!("access-secret-{}.tmp", random_hex()));
+        let path = secret_path(data_dir);
         let result = (|| -> Result<(), String> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
+            let mut file = secret_file()
                 .open(&temp)
                 .map_err(|_| "secret_store_failed")?;
-            file.write_all(&encrypted)
+            file.write_all(&encoded)
                 .map_err(|_| "secret_store_failed")?;
             file.sync_all().map_err(|_| "secret_store_failed")?;
             drop(file);
@@ -689,7 +728,7 @@ mod tests {
         );
         let restarted = Authority::load(&dir).unwrap();
         assert_ne!(restarted.bootstrap().unwrap().password, old_password);
-        fs::remove_file(dir.join("access-secret.dpapi")).unwrap();
+        fs::remove_file(secret_path(&dir)).unwrap();
         fs::remove_dir(dir).unwrap();
     }
 

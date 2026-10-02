@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "./bridge";
 import VDONinja from "@vdoninja/sdk";
 import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "./fingerprints";
@@ -17,7 +16,11 @@ const passwordField = document.querySelector<HTMLInputElement>("#password")!;
 const revealButton = document.querySelector<HTMLButtonElement>("#reveal")!;
 const copyButton = document.querySelector<HTMLButtonElement>("#copy")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
+const fastCaptureButton = document.querySelector<HTMLButtonElement>("#fast-capture")!;
+const lowDataButton = document.querySelector<HTMLButtonElement>("#low-data")!;
 const replacePasswordButton = document.querySelector<HTMLButtonElement>("#replace-password")!;
+const controlButton = document.querySelector<HTMLButtonElement>("#control")!;
+const openHostButton = document.querySelector<HTMLButtonElement>("#open-host")!;
 const createLinkButton = document.querySelector<HTMLButtonElement>("#create-link")!;
 const linkDetails = document.querySelector<HTMLElement>("#link-details")!;
 const linkField = document.querySelector<HTMLInputElement>("#access-link")!;
@@ -41,12 +44,18 @@ blankScreen();
 let sdk: VDONinja | null = null;
 let inviteSdk: VDONinja | null = null;
 let mediaSdk: VDONinja | null = null;
+let mediaTrack: CanvasCaptureMediaStreamTrack | null = null;
+let publishedTrack: MediaStreamTrack | null = null;
+let fastCapture: MediaStream | null = null;
+let lowData = false;
 let activePeer: string | null = null;
 let activeTransport: VDONinja | null = null;
 let currentInvite: Pick<AccessLink, "id" | "expiresAtMs"> | null = null;
 let stopped = false;
-let frameBusy = false;
 let startupStage = "bootstrap";
+let incomingQueue: Promise<void> = Promise.resolve();
+let incomingPending = 0;
+const LOW_DATA_MEDIA = { video: { maxBitrate: 350_000 } };
 
 function safeError(error: unknown): string {
   return String(error).replace(/[0-9a-f]{32,64}/gi, "[redacted]").slice(0, 160);
@@ -64,14 +73,121 @@ function send(peer: string, data: object, transport = activeTransport ?? sdk): b
 function closeMedia() {
   const previous = mediaSdk;
   mediaSdk = null;
+  mediaTrack = null;
+  publishedTrack = null;
   void previous?.disconnect().catch(() => {});
 }
+
+function canvasStream() {
+  let stream = canvas.captureStream(0);
+  let track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+  if (typeof track.requestFrame !== "function") {
+    stream.getTracks().forEach((item) => item.stop());
+    stream = canvas.captureStream(30);
+    track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+  } else {
+    track.requestFrame();
+  }
+  return { stream, track };
+}
+
+function displayConstraints(): MediaTrackConstraints {
+  return lowData
+    ? { width: { max: 960 }, height: { max: 540 }, frameRate: { ideal: 10, max: 10 } }
+    : { width: { max: 1280 }, height: { max: 720 }, frameRate: { ideal: 60, max: 60 } };
+}
+
+lowDataButton.addEventListener("click", async () => {
+  if (stopped) return;
+  lowDataButton.disabled = true;
+  try {
+    const enabled = !lowData;
+    await invoke("set_low_data_mode", { enabled });
+    lowData = enabled;
+    lowDataButton.textContent = `Low data mode: ${enabled ? "On" : "Off"}`;
+    lowDataButton.setAttribute("aria-pressed", String(enabled));
+    let limitsApplied = true;
+    if (mediaSdk) {
+      try { await mediaSdk.updatePublisherMedia(enabled ? { media: LOW_DATA_MEDIA } : { clear: true }); }
+      catch { limitsApplied = false; }
+    }
+    const track = fastCapture?.getVideoTracks()[0];
+    if (track?.readyState === "live") {
+      try { await track.applyConstraints(displayConstraints()); }
+      catch { limitsApplied = false; }
+    }
+    setStatus(limitsApplied ? (enabled ? "Low data mode on" : "Low data mode off") : "Mode changed; browser stream limits may be unavailable");
+  } catch (error) {
+    setStatus(`Stream limits may be unavailable: ${safeError(error)}`);
+  } finally {
+    lowDataButton.disabled = stopped;
+  }
+});
+
+function stopFastCapture() {
+  const stream = fastCapture;
+  fastCapture = null;
+  stream?.getTracks().forEach((track) => track.stop());
+  fastCaptureButton.textContent = "Share primary display (fast)";
+  fastCaptureButton.disabled = !!activePeer || stopped;
+  void invoke("set_screen_capture_paused", { paused: false }).catch(() => {});
+}
+
+fastCaptureButton.addEventListener("click", async () => {
+  if (fastCapture || activePeer || stopped) return;
+  fastCaptureButton.disabled = true;
+  try {
+    // This call must run directly from the click; browsers require a user gesture.
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: "monitor" }, audio: false });
+    const track = stream.getVideoTracks()[0];
+    if (!track || (track.getSettings().displaySurface && track.getSettings().displaySurface !== "monitor")) {
+      stream.getTracks().forEach((item) => item.stop());
+      throw new Error("Select the primary display, not a window or tab");
+    }
+    track.contentHint = "motion";
+    await track.applyConstraints(displayConstraints()).catch(() => {});
+    if (activePeer || stopped) {
+      stream.getTracks().forEach((item) => item.stop());
+      throw new Error("Enable fast capture before the controller connects");
+    }
+    fastCapture = stream;
+    track.addEventListener("ended", () => {
+      if (fastCapture !== stream) return;
+      stopFastCapture();
+      setStatus("Fast capture ended; standard capture ready");
+      const candidate = mediaSdk;
+      if (candidate && activePeer && publishedTrack === track) {
+        const fallback = canvasStream();
+        void candidate.replaceTrack(track, fallback.track).then(() => {
+          if (mediaSdk === candidate) {
+            mediaTrack = fallback.track;
+            publishedTrack = fallback.track;
+            setStatus("Fast capture ended; using standard capture");
+          }
+        }).catch(() => {
+          closeMedia();
+          setStatus("Screen sharing stopped; reconnect the controller");
+        });
+      }
+    }, { once: true });
+    await invoke("set_screen_capture_paused", { paused: true });
+    if (fastCapture !== stream) throw new Error("Screen sharing stopped");
+    fastCaptureButton.textContent = "Fast capture on";
+    setStatus("Fast capture ready; choose the primary display for accurate mouse control");
+  } catch (error) {
+    stopFastCapture();
+    setStatus(`Fast capture unavailable: ${safeError(error)}`);
+  } finally {
+    fastCaptureButton.disabled = !!fastCapture || !!activePeer || stopped;
+  }
+});
 
 function closeActive(transport: VDONinja) {
   if (activeTransport !== transport) return;
   if (activePeer) void invoke("disconnect", { peer: activePeer }).catch(() => {});
   activePeer = null;
   activeTransport = null;
+  fastCaptureButton.disabled = !!fastCapture || stopped;
   closeMedia();
   blankScreen();
   if (!stopped) setStatus("Waiting for browser");
@@ -90,7 +206,19 @@ function clearInvite() {
 
 function bindControl(transport: VDONinja, inviteId?: string) {
   transport.on("dataReceived", (event) => {
-    if (!event.detail.fallback) void handleData(transport, event.detail.uuid, event.detail.data, inviteId);
+    if (event.detail.fallback) return;
+    if (incomingPending >= 64) {
+      if (activePeer === event.detail.uuid && activeTransport === transport) {
+        const peer = activePeer;
+        closeActive(transport);
+        send(peer, { type: "auth_error" }, transport);
+      }
+      return;
+    }
+    incomingPending++;
+    incomingQueue = incomingQueue.then(() => handleData(transport, event.detail.uuid, event.detail.data, inviteId))
+      .catch((error) => console.warn(`[host] command failed: ${safeError(error)}`))
+      .finally(() => { incomingPending--; });
   });
   transport.on("peerDisconnected", (event) => {
     if (event.detail.uuid === activePeer) closeActive(transport);
@@ -111,10 +239,20 @@ async function startMedia(password: string) {
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
     await candidate.joinRoom({ room, password });
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
-    await candidate.publish(canvas.captureStream(15), { streamID: `host_${room}`, label: "Windows desktop" });
+    const fastTrack = fastCapture?.getVideoTracks()[0];
+    const fallback = fastTrack?.readyState === "live" ? null : canvasStream();
+    const stream = fallback?.stream ?? fastCapture!;
+    const track = fallback?.track ?? fastTrack!;
+    mediaTrack = fallback?.track ?? null;
+    await candidate.publish(stream, {
+      streamID: `host_${room}`,
+      label: "Desktop",
+      ...(lowData ? { media: LOW_DATA_MEDIA } : {}),
+    });
     if (mediaSdk !== candidate || !activePeer) throw new Error("Media session canceled");
+    publishedTrack = track;
   } catch (error) {
-    if (mediaSdk === candidate) mediaSdk = null;
+    if (mediaSdk === candidate) { mediaSdk = null; mediaTrack = null; publishedTrack = null; }
     await candidate.disconnect().catch(() => {});
     throw error;
   }
@@ -137,6 +275,7 @@ async function handleData(transport: VDONinja, peer: string, data: unknown, invi
         return;
       }
       activePeer = peer;
+      fastCaptureButton.disabled = true;
       activeTransport = transport;
       try {
         await startMedia(result.mediaPassword);
@@ -145,7 +284,7 @@ async function handleData(transport: VDONinja, peer: string, data: unknown, invi
         closeActive(transport);
         throw error;
       }
-      setStatus("Browser connected");
+      setStatus("Controller connected");
       return;
     }
     if (peer !== activePeer || transport !== activeTransport) return;
@@ -179,14 +318,20 @@ async function start() {
   const config = await invoke<Bootstrap>("bootstrap");
   startupStage = "events";
   passwordField.value = config.password;
+  if (await invoke<string>("transport_mode") === "external") {
+    openHostButton.hidden = false;
+    fastCaptureButton.hidden = true;
+    lowDataButton.hidden = true;
+    setStatus("Open browser host to receive connections");
+    return;
+  }
   sdk = new VDONinja({ password: config.password, salt: "vdo.ninja" });
   bindControl(sdk);
   await listen<Frame>("screen-frame", async (event) => {
-    if (!activePeer || frameBusy || stopped) return;
-    frameBusy = true;
+    if (!activePeer || stopped) return;
+    const bytes = Uint8Array.from(atob(event.payload.jpegBase64), (char) => char.charCodeAt(0));
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
     try {
-      const bytes = Uint8Array.from(atob(event.payload.jpegBase64), (char) => char.charCodeAt(0));
-      const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
       if (canvas.width !== event.payload.width || canvas.height !== event.payload.height) {
         canvas.width = event.payload.width;
         canvas.height = event.payload.height;
@@ -210,10 +355,10 @@ async function start() {
           context.fill();
           context.stroke();
         }
+        mediaTrack?.requestFrame();
       }
-      bitmap.close();
     } finally {
-      frameBusy = false;
+      bitmap.close();
     }
   });
   startupStage = "signaling";
@@ -226,16 +371,17 @@ async function start() {
   setStatus("Publishing control channel…");
   await sdk.publish(controlCanvas.captureStream(1), { streamID: config.streamId, label: "Control channel" });
   startupStage = "ready";
-  setStatus("Waiting for browser");
+  setStatus("Waiting for controller");
   setInterval(async () => {
     if (!activePeer || stopped) return;
     const authoritativePeer = await invoke<string | null>("active_peer").catch(() => null);
     if (authoritativePeer !== activePeer) {
       activePeer = null;
+      fastCaptureButton.disabled = !!fastCapture || stopped;
       activeTransport = null;
       closeMedia();
       blankScreen();
-      setStatus("Waiting for browser");
+      setStatus("Waiting for controller");
       return;
     }
     const text = await invoke<string | null>("read_clipboard").catch(() => null);
@@ -328,6 +474,7 @@ copyButton.addEventListener("click", async () => {
 stopButton.addEventListener("click", async () => {
   stopped = true;
   activePeer = null;
+  stopFastCapture();
   activeTransport = null;
   closeMedia();
   blankScreen();
@@ -336,6 +483,7 @@ stopButton.addEventListener("click", async () => {
   await sdk?.disconnect();
   setStatus("Stopped");
   stopButton.disabled = true;
+  lowDataButton.disabled = true;
 });
 replacePasswordButton.addEventListener("click", async () => {
   replacePasswordButton.disabled = true;
@@ -347,16 +495,19 @@ replacePasswordButton.addEventListener("click", async () => {
     await invoke("replace_password");
     stopped = true;
     activePeer = null;
+    stopFastCapture();
     activeTransport = null;
     closeMedia();
     blankScreen();
     clearInvite();
     await sdk?.disconnect();
     stopButton.disabled = true;
+    lowDataButton.disabled = true;
     setStatus("Restarting with new password…");
   } catch {
     stopped = true;
     activePeer = null;
+    stopFastCapture();
     activeTransport = null;
     await invoke("stop").catch(() => {});
     closeMedia();
@@ -365,8 +516,16 @@ replacePasswordButton.addEventListener("click", async () => {
     await sdk?.disconnect().catch(() => {});
     setStatus("Password replacement failed. Remote access is stopped.");
     stopButton.disabled = true;
+    lowDataButton.disabled = true;
     replacePasswordButton.disabled = false;
   }
+});
+
+controlButton.addEventListener("click", () => {
+  void invoke("open_controller").catch(() => setStatus("Could not open controller"));
+});
+openHostButton.addEventListener("click", () => {
+  void invoke("open_browser_host").catch(() => setStatus("Could not open browser host"));
 });
 
 void start().catch((error) => {

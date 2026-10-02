@@ -3,7 +3,9 @@ import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
 import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from "../src/protocol";
 import { watchTextFit } from "../src/text-fit";
+import { iceRoute } from "../src/route";
 import { clampPan, followPoint, imageRect, relativePoint, screenPoint, zoomPan, type View } from "./view-geometry";
+import { MouseMoveQueue } from "./mouse-queue";
 import "./style.css";
 
 const accessFragment = location.hash;
@@ -25,6 +27,7 @@ const viewOptions = document.querySelector<HTMLElement>("#view-options")!;
 const displayButton = document.querySelector<HTMLButtonElement>("#display-options")!;
 const fullscreenButton = document.querySelector<HTMLButtonElement>("#fullscreen")!;
 const sessionStatus = document.querySelector<HTMLElement>("#session-status")!;
+const routeStatus = document.querySelector<HTMLElement>("#route-status")!;
 const clipboardPanel = document.querySelector<HTMLElement>("#clipboard")!;
 const clipboardButton = document.querySelector<HTMLButtonElement>("#clipboard-toggle")!;
 const remoteText = document.querySelector<HTMLTextAreaElement>("#remote-text")!;
@@ -47,7 +50,6 @@ let clientNonce = "";
 let helloSent = false;
 let authTranscript = "";
 let seq = 0;
-let queuedMoves = 0;
 let commandQueue: Promise<void> = Promise.resolve();
 let lastPosition = { x: 32768, y: 32768 };
 let inputMode: "mouse" | "touch" = "mouse";
@@ -63,6 +65,7 @@ let viewScale = 1;
 let panX = 0;
 let panY = 0;
 let connectionTimer: number | null = null;
+let routeTimer: number | null = null;
 let usingAccessLink = false;
 let immersiveFallback = false;
 const maxZoom = 32;
@@ -79,11 +82,16 @@ function safeError(error: unknown): string {
 
 function resetConnection(message: string) {
   cancelTouch();
+  moveQueue.reset();
+  commandQueue = Promise.resolve();
   if (document.fullscreenElement === session) void document.exitFullscreen().catch(() => {});
   immersiveFallback = false;
   syncFullscreen();
   if (connectionTimer !== null) clearTimeout(connectionTimer);
   connectionTimer = null;
+  if (routeTimer !== null) clearInterval(routeTimer);
+  routeTimer = null;
+  routeStatus.textContent = "";
   const previous = sdk;
   const previousMedia = mediaSdk;
   sdk = null;
@@ -132,10 +140,20 @@ async function startMedia(password: string) {
       session.hidden = false;
       document.body.classList.add("in-session");
       setStatus("Connected");
+      const mediaPeer = received.detail.uuid;
+      const updateRoute = async () => {
+        if (mediaSdk !== candidate) return;
+        const entries = (await candidate.getStats(mediaPeer))[mediaPeer] ?? [];
+        routeStatus.textContent = iceRoute(entries, "viewer");
+      };
+      if (routeTimer !== null) clearInterval(routeTimer);
+      routeStatus.textContent = "Route unknown";
+      routeTimer = window.setInterval(() => { void updateRoute().catch(() => {}); }, 5000);
+      void updateRoute().catch(() => {});
       void video.play().catch(() => setStatus("Tap the screen to start video"));
     });
     candidate.on("peerDisconnected", () => {
-      if (mediaSdk === candidate) resetConnection("Laptop disconnected");
+      if (mediaSdk === candidate) resetConnection("Remote PC disconnected");
     });
     await candidate.connect();
     if (mediaSdk !== candidate) return;
@@ -155,18 +173,30 @@ function send(data: object) {
   }
 }
 
+function sendMouse(op: number, x: number, y: number, arg: number): Promise<number> {
+  const key = sessionKey;
+  const target = hostUuid;
+  const peer = clientUuid;
+  const currentSdk = sdk;
+  const currentGeneration = generation;
+  const job = commandQueue.then(async () => {
+    if (!key || !target || !peer || !currentSdk || sessionKey !== key || sdk !== currentSdk) throw new Error("Connection closed");
+    const next = ++seq;
+    const mac = await hmacHex(key, mouseMessage(currentGeneration, peer, next, op, x, y, arg));
+    if (sessionKey !== key || sdk !== currentSdk || !currentSdk.sendData({ type: "mouse", seq: next, op, x, y, arg, mac }, { uuid: target, allowFallback: false })) throw new Error("Connection closed");
+    return next;
+  });
+  commandQueue = job.then(() => {}, () => { if (sdk === currentSdk) setStatus("Connection interrupted"); });
+  return job;
+}
+
+const moveQueue = new MouseMoveQueue(({ x, y }) => sendMouse(1, x, y, 0));
+
 function queueMouse(op: number, x = lastPosition.x, y = lastPosition.y, arg = 0) {
   if (!sessionKey || !hostUuid || !clientUuid || !sdk) return;
-  if (op === 1 && queuedMoves >= 2) return;
-  if (op === 1) queuedMoves++;
-  commandQueue = commandQueue.then(async () => {
-    if (!sessionKey || !sdk || !hostUuid || !clientUuid) return;
-    const next = ++seq;
-    const mac = await hmacHex(sessionKey, mouseMessage(generation, clientUuid, next, op, x, y, arg));
-    send({ type: "mouse", seq: next, op, x, y, arg, mac });
-  }).catch(() => setStatus("Connection interrupted")).finally(() => {
-    if (op === 1) queuedMoves--;
-  });
+  if (op === 1) { moveQueue.move(x, y); return; }
+  moveQueue.cancelPending();
+  void sendMouse(op, x, y, arg).catch(() => {});
 }
 
 function queueClipboard(text: string) {
@@ -175,12 +205,17 @@ function queueClipboard(text: string) {
     setStatus("Clipboard text is too large");
     return;
   }
+  const key = sessionKey;
+  const target = hostUuid;
+  const peer = clientUuid;
+  const currentSdk = sdk;
+  const currentGeneration = generation;
   commandQueue = commandQueue.then(async () => {
-    if (!sessionKey || !sdk || !hostUuid || !clientUuid) return;
+    if (sessionKey !== key || sdk !== currentSdk) return;
     const next = ++seq;
-    const mac = await hmacHex(sessionKey, await clipboardMessage(generation, clientUuid, next, text));
-    send({ type: "clipboard", seq: next, text, mac });
-  }).catch(() => setStatus("Connection interrupted"));
+    const mac = await hmacHex(key, await clipboardMessage(currentGeneration, peer, next, text));
+    if (sessionKey !== key || sdk !== currentSdk || !currentSdk.sendData({ type: "clipboard", seq: next, text, mac }, { uuid: target, allowFallback: false })) throw new Error("Connection closed");
+  }).catch(() => { if (sdk === currentSdk) setStatus("Connection interrupted"); });
 }
 
 function view(): View {
@@ -247,7 +282,10 @@ async function handleData(uuid: string, data: unknown) {
       try { await navigator.clipboard.writeText(data.text); } catch { /* Copy button remains available. */ }
       return;
     }
-    if (data.type === "ack" && data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
+    if (data.type === "ack" && typeof data.seq === "number") {
+      moveQueue.ack(data.seq);
+      if (data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
+    }
   } catch (error) {
     console.warn(`[client] authentication failed: ${safeError(error)}`);
     resetConnection("Authentication failed");
@@ -588,10 +626,10 @@ copyRemote.addEventListener("click", async () => {
   catch { remoteText.select(); setStatus("Select and copy the text above"); }
 });
 pasteLocal.addEventListener("click", async () => {
-  try { localText.value = await navigator.clipboard.readText(); queueClipboard(localText.value); setStatus("Sent to laptop"); }
+  try { localText.value = await navigator.clipboard.readText(); queueClipboard(localText.value); setStatus("Sent to remote PC"); }
   catch { localText.focus(); setStatus("Paste into the text box, then send"); }
 });
-sendLocal.addEventListener("click", () => { queueClipboard(localText.value); setStatus("Sent to laptop"); });
+sendLocal.addEventListener("click", () => { queueClipboard(localText.value); setStatus("Sent to remote PC"); });
 localText.addEventListener("paste", () => { setTimeout(() => queueClipboard(localText.value), 0); });
 
 void watchTextFit();

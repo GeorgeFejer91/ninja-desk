@@ -18,6 +18,7 @@ body.in-session { overflow: hidden; background: #101010; }
 .session-title { min-width: 0; display: grid; gap: 1px; }
 .session-title strong { font-weight: 600; font-size: 14px; line-height: 19px; }
 #session-status { min-width: 0; color: #d6d3d1; font-size: 12px; line-height: 16px; }
+#route-status { min-width: 0; color: #a8a29e; font-size: 12px; line-height: 16px; }
 .session-actions { flex: none; display: flex; gap: 6px; }
 .session-actions button, .session-toolbar button, .view-options button, .clipboard button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; border-color: #57534e; color: #f5f5f4; background: #343230; }
 .session-actions button:hover, .session-toolbar button:hover, .view-options button:hover, .clipboard button:hover { background: #44403c; }

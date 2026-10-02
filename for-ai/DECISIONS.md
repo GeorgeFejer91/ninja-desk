@@ -25,7 +25,25 @@ to rediscover. Source and tests remain the authority for implementation facts.
 - Consequences: Source and the companion page are public. Remote control still requires the host-generated password. Preserve the internal Tauri identifier so existing DPAPI data remains readable.
 - Supersedes: None
 
-## D-0003 — Temporary URL uses a separate in-memory invitation
+## D-0003 — Linux WebRTC in an external local browser
+
+- Date: 2026-10-02
+- Status: Accepted
+- Context: Linux WebKitGTK WebRTC is experimental or disabled in current releases, while the product transport depends on WebRTC.
+- Decision: Keep Rust as the Linux desktop authority and expose only a token-protected localhost API to a browser-host page bundled with the app. Use the default browser for Linux hosting and control; target X11 input. Windows retains its integrated WebView transport and controller.
+- Consequences: The browser host requires a local browser window and a working default browser. The Linux package must be tested on a real X11 desktop; build success cannot establish runtime support. The existing VDO.Ninja signaling path remains required and may select a direct or relayed ICE route.
+- Supersedes: None
+
+## D-0004 — Separate Linux screen capture dependency
+
+- Date: 2026-10-02
+- Status: Accepted
+- Context: `xcap` links PipeWire on Linux even for X11 capture, and its current PipeWire bindings do not compile against Ubuntu 22.04 headers.
+- Decision: Use `screenshots` for the Linux capture path and keep `xcap` for Windows. Convert the Linux image buffer into the existing JPEG encoder's image type without copying pixels.
+- Consequences: The Ubuntu 22.04 installer can target X11 without PipeWire build headers. Capture and control still require a real X11 desktop test.
+- Supersedes: None
+
+## D-0005 — Temporary URL uses a separate in-memory invitation
 
 - Date: 2026-10-02
 - Status: Accepted
