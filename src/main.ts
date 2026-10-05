@@ -428,6 +428,7 @@ async function start() {
   if (transportMode === "external" || transportMode === "browser") useBrowserConnections();
   if (transportMode === "external") {
     openHostButton.hidden = false;
+    document.querySelector(".desktop-pairing")!.prepend(openHostButton);
     fastCaptureButton.hidden = true;
     lowDataButton.hidden = true;
     startLoginButton.hidden = true;
