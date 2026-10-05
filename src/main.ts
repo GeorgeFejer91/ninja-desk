@@ -807,7 +807,8 @@ quickConnect.addEventListener("submit", async (event) => {
 
 function fitSavedPage() {
   if (!savedList.clientHeight) return;
-  const size = Math.max(1, Math.min(4, Math.floor((savedList.clientHeight + 8) / (window.innerWidth < 740 ? 144 : 108))));
+  const size = document.body.dataset.panelFit === "reflow" ? 1 :
+    Math.max(1, Math.min(4, Math.floor((savedList.clientHeight + 8) / (window.innerWidth < 740 ? 144 : 108))));
   if (size !== savedPageBudget) { savedPageBudget = size; savedPageSize = size; savedPage = 0; renderSavedComputers(); }
 }
 

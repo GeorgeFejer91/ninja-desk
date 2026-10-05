@@ -38,6 +38,8 @@ For the CLI and saved-PC home, exercise the installed console executable against
 
 For immersive viewing, verify Alt+F enters and exits the installed window's OS fullscreen while Ninja Desk has focus, without key-repeat toggles or affecting another app. Check exit after disconnect, edge reveal, pinned controls, keyboard focus, reduced motion, and pointer mapping in fit, original-size, and zoomed views. Observe the bounded home and settings panels at their supported minimum and larger sizes with long saved-PC names, pagination, 200% text enlargement, and text-spacing overrides. Frontend builds and geometry arithmetic do not qualify the rendered WebView or native hotkey.
 
+For the readable no-fit fallback, verify page reflow without overlapping controls or internal panel scrollbars, then enlarge the viewport and verify bounded geometry returns. Isolated headless browser fixtures may qualify shared HTML layout, pagination and focus presentation; explicitly distinguish their mocked authority/media from installed native behavior. Text-spacing overrides need DOM verification rather than a claim of exact Pretext prediction.
+
 ## Publication
 
 Review staged files for credentials and generated artifacts before public commit. Push without force; verify remote SHA. Confirm Windows check and Pages workflows for that SHA, fetch the Pages HTML/assets, and run the installer workflow to confirm an NSIS executable artifact. Installer build does not prove installation. Report exact results, limitations, and control-plane changes.
