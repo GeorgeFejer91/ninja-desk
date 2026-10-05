@@ -25,13 +25,10 @@ npm run build
 npm run check:protocol
 npm run check:view
 cargo test --locked --manifest-path src-tauri/Cargo.toml
-cargo build --release --locked --manifest-path src-tauri/Cargo.toml --bin ninja-desk-cli
-New-Item -ItemType Directory -Force src-tauri/binaries
-Copy-Item src-tauri/target/release/ninja-desk-cli.exe src-tauri/binaries/ninja-desk-cli-x86_64-pc-windows-msvc.exe
-npm run tauri build -- --config src-tauri/tauri.bundle.conf.json --bundles nsis
+npm run tauri build -- --bundles nsis
 ```
 
-On x86_64 Linux, build the console companion, copy `src-tauri/target/release/ninja-desk-cli` to `src-tauri/binaries/ninja-desk-cli-x86_64-unknown-linux-gnu`, then run `npm run tauri build -- --config src-tauri/tauri.bundle.conf.json` for the `.deb` and `.AppImage` bundles. The packaging overlay is applied only after that executable exists, so ordinary Rust checks work from a clean checkout.
+On x86_64 Linux, run `npm run tauri build` for the `.deb` and `.AppImage` bundles. Tauri builds and bundles both Cargo binaries; `default-run` identifies the desktop app. The console companion does not require a separate sidecar build or staging step.
 
 ## Connection diagnostics
 
