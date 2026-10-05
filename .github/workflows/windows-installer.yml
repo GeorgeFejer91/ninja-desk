@@ -15,6 +15,11 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
+      - name: Build console companion
+        run: |
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --bin ninja-desk-cli
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          Copy-Item src-tauri/target/release/ninja-desk-cli.exe src-tauri/binaries/ninja-desk-cli-x86_64-pc-windows-msvc.exe
       - run: npm run tauri build -- --bundles nsis
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

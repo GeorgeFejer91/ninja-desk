@@ -1,13 +1,16 @@
 mod authority;
 #[cfg(target_os = "linux")]
 mod browser_host;
+mod cli;
 mod screen;
+
+pub use cli::cli_main;
 
 use authority::{
     AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, ControllerTrust,
     MouseCommand, TrustedGrant,
 };
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 fn require_host(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -49,41 +52,100 @@ fn open_browser_host(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Res
     }
 }
 
+pub(crate) fn ensure_controller_window(
+    app: &tauri::AppHandle,
+    visible: bool,
+) -> Result<tauri::WebviewWindow, String> {
+    if let Some(controller) = app.get_webview_window("controller") {
+        if visible {
+            controller.show().map_err(|_| "window_failed")?;
+            controller.set_focus().map_err(|_| "window_failed")?;
+        }
+        return Ok(controller);
+    }
+    let controller = tauri::WebviewWindowBuilder::new(
+        app,
+        "controller",
+        tauri::WebviewUrl::App("controller.html".into()),
+    )
+    .title("Ninja Desk — Control another PC")
+    .inner_size(1100.0, 760.0)
+    .min_inner_size(640.0, 420.0)
+    .visible(visible)
+    .build()
+    .map_err(|_| "window_failed")?;
+    if visible {
+        controller.set_focus().map_err(|_| "window_failed")?;
+    }
+    Ok(controller)
+}
+
 #[tauri::command]
-async fn open_controller(
+fn open_controller(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    ensure_controller_window(&app, true)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn connect_controller(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
+    password: Option<String>,
+    host_id: Option<String>,
 ) -> Result<(), String> {
     if window.label() != "main" {
         return Err("unavailable".into());
     }
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open")
-            .arg("https://georgefejer91.github.io/ninja-desk/")
-            .spawn()
-            .map_err(|_| "browser_open_failed")?;
-        return Ok(());
+    let action = cli::CliAction::ControllerConnect { password, host_id };
+    if !action.valid() {
+        return Err("invalid_arguments".into());
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        if let Some(controller) = app.get_webview_window("controller") {
-            controller.show().map_err(|_| "window_failed")?;
-            controller.set_focus().map_err(|_| "window_failed")?;
-            return Ok(());
-        }
-        tauri::WebviewWindowBuilder::new(
-            &app,
-            "controller",
-            tauri::WebviewUrl::App("controller.html".into()),
-        )
-        .title("Ninja Desk — Control another PC")
-        .inner_size(1100.0, 760.0)
-        .min_inner_size(640.0, 420.0)
-        .build()
+    ensure_controller_window(&app, true)?;
+    std::thread::spawn(move || {
+        let _ = cli::dispatch(&app, action);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn report_runtime_status(
+    window: tauri::WebviewWindow,
+    runtime: State<'_, cli::CliRuntime>,
+    status: cli::RuntimeStatus,
+) -> Result<(), String> {
+    runtime.report(window.label(), status)
+}
+
+#[tauri::command]
+fn complete_cli_action(
+    window: tauri::WebviewWindow,
+    runtime: State<'_, cli::CliRuntime>,
+    request_id: String,
+    result: cli::ActionResult,
+) -> Result<(), String> {
+    runtime.complete(window.label(), &request_id, result)
+}
+
+#[tauri::command]
+fn set_window_fullscreen(window: tauri::WebviewWindow, enabled: bool) -> Result<bool, String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    window
+        .set_fullscreen(enabled)
         .map_err(|_| "window_failed")?;
-        Ok(())
+    window.is_fullscreen().map_err(|_| "window_failed".into())
+}
+
+#[tauri::command]
+fn get_window_fullscreen(window: tauri::WebviewWindow) -> Result<bool, String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
     }
+    window.is_fullscreen().map_err(|_| "window_failed".into())
 }
 
 #[tauri::command]
@@ -150,6 +212,7 @@ fn revoke_trusted_pc(
 fn load_trusted_controller(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
+    host_id: Option<String>,
 ) -> Result<Option<ControllerTrust>, String> {
     if window.label() != "controller" {
         return Err("unavailable".into());
@@ -158,7 +221,7 @@ fn load_trusted_controller(
         .path()
         .app_data_dir()
         .map_err(|_| "secret_store_failed")?;
-    authority::load_controller_trust(&data_dir)
+    authority::load_controller_trust_for(&data_dir, host_id.as_deref())
 }
 
 #[tauri::command]
@@ -181,6 +244,7 @@ fn save_trusted_controller(
 fn forget_trusted_controller(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
+    host_id: Option<String>,
 ) -> Result<(), String> {
     if window.label() != "controller" {
         return Err("unavailable".into());
@@ -189,7 +253,84 @@ fn forget_trusted_controller(
         .path()
         .app_data_dir()
         .map_err(|_| "secret_store_failed")?;
-    authority::forget_controller_trust(&data_dir)
+    match host_id {
+        Some(id) => authority::forget_controller_trust_for(&data_dir, &id),
+        None => authority::forget_controller_trust(&data_dir),
+    }
+}
+
+#[tauri::command]
+fn list_saved_computers(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Vec<authority::SavedComputerSummary>, String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::list_saved_computers(&data_dir)
+}
+
+#[tauri::command]
+fn rename_saved_computer(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+    name: String,
+) -> Result<(), String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::rename_saved_computer(&data_dir, &host_id, &name)
+}
+
+#[tauri::command]
+fn forget_saved_computer(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+) -> Result<(), String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::forget_controller_trust_for(&data_dir, &host_id)?;
+    if app.get_webview_window("controller").is_some() {
+        app.emit_to(
+            "controller",
+            "ninja-saved-computer-forgotten",
+            serde_json::json!({"hostId": host_id}),
+        )
+        .map_err(|_| "window_failed")?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn touch_saved_computer(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+    id: String,
+) -> Result<(), String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::touch_saved_computer(&data_dir, &host_id, &id)
 }
 
 #[tauri::command]
@@ -435,6 +576,8 @@ pub fn run() {
             }
             app.manage(authority);
             app.manage(screen::FrameStore::default());
+            app.manage(cli::CliRuntime::default());
+            cli::start(app.handle().clone(), &data_dir).map_err(std::io::Error::other)?;
             #[cfg(target_os = "linux")]
             {
                 let browser_host =
@@ -452,6 +595,15 @@ pub fn run() {
             load_trusted_controller,
             save_trusted_controller,
             forget_trusted_controller,
+            list_saved_computers,
+            rename_saved_computer,
+            forget_saved_computer,
+            touch_saved_computer,
+            report_runtime_status,
+            complete_cli_action,
+            connect_controller,
+            set_window_fullscreen,
+            get_window_fullscreen,
             get_start_on_login,
             set_start_on_login,
             revoke_access_link,

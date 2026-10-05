@@ -4,6 +4,7 @@ node_modules/
 dist/
 companion-dist/
 src-tauri/target/
+src-tauri/binaries/
 src-tauri/icons/android/
 src-tauri/icons/ios/
 src-tauri/icons/64x64.png

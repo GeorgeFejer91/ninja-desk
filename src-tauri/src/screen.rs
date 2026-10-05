@@ -30,7 +30,7 @@ pub struct Frame {
 
 #[derive(Default)]
 pub struct FrameStore {
-    frame: Mutex<(u64, Option<Frame>)>,
+    frame: Mutex<(u64, Option<Frame>, Option<Instant>)>,
     paused: AtomicBool,
     low_data: AtomicBool,
 }
@@ -39,6 +39,15 @@ pub struct FrameStore {
 pub struct FrameResult {
     seq: u64,
     payload: Frame,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameStats {
+    pub sequence: u64,
+    pub last_frame_age_ms: Option<u64>,
+    pub paused: bool,
+    pub low_data: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -114,6 +123,19 @@ impl FrameStore {
         })
     }
 
+    pub fn stats(&self) -> FrameStats {
+        let state = self.frame.lock().ok();
+        FrameStats {
+            sequence: state.as_ref().map_or(0, |state| state.0),
+            last_frame_age_ms: state
+                .as_ref()
+                .and_then(|state| state.2)
+                .map(|at| at.elapsed().as_millis() as u64),
+            paused: self.paused(),
+            low_data: self.low_data(),
+        }
+    }
+
     fn put(&self, frame: Frame) {
         if let Ok(mut state) = self.frame.lock() {
             if self.paused() {
@@ -121,6 +143,7 @@ impl FrameStore {
             }
             state.0 = state.0.wrapping_add(1);
             state.1 = Some(frame);
+            state.2 = Some(Instant::now());
         }
     }
 
@@ -128,6 +151,7 @@ impl FrameStore {
         self.paused.store(paused, Ordering::Relaxed);
         if let Ok(mut state) = self.frame.lock() {
             state.1 = None;
+            state.2 = None;
         }
     }
 

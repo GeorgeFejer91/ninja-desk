@@ -53,6 +53,22 @@ pub struct ControllerTrust {
     pub host_id: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedComputer {
+    trust: ControllerTrust,
+    name: String,
+    last_connected_at_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedComputerSummary {
+    pub host_id: String,
+    pub name: String,
+    pub last_connected_at_ms: u64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Challenge {
@@ -206,7 +222,7 @@ fn encode_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn read_protected(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_protected(path: &Path) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     {
         let metadata = fs::symlink_metadata(path).map_err(|_| "secret_store_failed")?;
@@ -215,7 +231,7 @@ fn read_protected(path: &Path) -> Result<Vec<u8>, String> {
         }
     }
     let encrypted = fs::read(path).map_err(|_| "secret_store_failed")?;
-    if encrypted.is_empty() || encrypted.len() > 4096 {
+    if encrypted.is_empty() || encrypted.len() > 64 * 1024 {
         return Err("secret_store_invalid".into());
     }
     #[cfg(windows)]
@@ -228,7 +244,7 @@ fn read_protected(path: &Path) -> Result<Vec<u8>, String> {
     }
 }
 
-fn write_protected(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_protected(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let encoded = encode_secret(bytes)?;
     let temp = path.with_extension(format!("{}.tmp", random_hex()));
     let result = (|| -> Result<(), String> {
@@ -259,33 +275,175 @@ fn valid_trust(trust: &ControllerTrust) -> bool {
         && trust.host_id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-pub fn load_controller_trust(data_dir: &Path) -> Result<Option<ControllerTrust>, String> {
-    let path = trust_path(data_dir, true);
-    if !path.exists() {
-        return Ok(None);
+fn saved_computers_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(format!(
+        "controller-trusts.{}",
+        if cfg!(windows) { "dpapi" } else { "bin" }
+    ))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn default_computer_name(host_id: &str) -> String {
+    format!("PC {}", &host_id[..8])
+}
+
+fn read_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputer>, String> {
+    let path = saved_computers_path(data_dir);
+    if path.exists() {
+        let entries: Vec<SavedComputer> =
+            serde_json::from_slice(&read_protected(&path)?).map_err(|_| "secret_store_invalid")?;
+        if entries.len() > 64
+            || entries.iter().any(|entry| {
+                !valid_trust(&entry.trust)
+                    || entry.name.trim().is_empty()
+                    || entry.name.len() > 64
+                    || entry.name.chars().any(char::is_control)
+            })
+            || entries.iter().enumerate().any(|(index, entry)| {
+                entries[..index]
+                    .iter()
+                    .any(|previous| previous.trust.host_id == entry.trust.host_id)
+            })
+        {
+            return Err("secret_store_invalid".into());
+        }
+        return Ok(entries);
+    }
+    let legacy = trust_path(data_dir, true);
+    if !legacy.exists() {
+        return Ok(Vec::new());
     }
     let trust: ControllerTrust =
-        serde_json::from_slice(&read_protected(&path)?).map_err(|_| "secret_store_invalid")?;
+        serde_json::from_slice(&read_protected(&legacy)?).map_err(|_| "secret_store_invalid")?;
     if !valid_trust(&trust) {
         return Err("secret_store_invalid".into());
     }
-    Ok(Some(trust))
+    let entries = vec![SavedComputer {
+        name: default_computer_name(&trust.host_id),
+        trust,
+        last_connected_at_ms: now_ms(),
+    }];
+    let bytes = serde_json::to_vec(&entries).map_err(|_| "secret_store_failed")?;
+    write_protected(&path, &bytes)?;
+    fs::remove_file(legacy).map_err(|_| "secret_store_failed")?;
+    Ok(entries)
+}
+
+fn write_saved_computers(data_dir: &Path, entries: &[SavedComputer]) -> Result<(), String> {
+    let path = saved_computers_path(data_dir);
+    if entries.is_empty() {
+        if path.exists() {
+            fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+        }
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(entries).map_err(|_| "secret_store_failed")?;
+    write_protected(&path, &bytes)
+}
+
+pub fn list_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputerSummary>, String> {
+    Ok(read_saved_computers(data_dir)?
+        .into_iter()
+        .map(|entry| SavedComputerSummary {
+            host_id: entry.trust.host_id,
+            name: entry.name,
+            last_connected_at_ms: entry.last_connected_at_ms,
+        })
+        .collect())
+}
+
+pub fn load_controller_trust_for(
+    data_dir: &Path,
+    host_id: Option<&str>,
+) -> Result<Option<ControllerTrust>, String> {
+    let entries = read_saved_computers(data_dir)?;
+    Ok(match host_id {
+        Some(id) => entries
+            .into_iter()
+            .find(|entry| entry.trust.host_id == id)
+            .map(|entry| entry.trust),
+        None => entries.into_iter().next().map(|entry| entry.trust),
+    })
+}
+
+pub fn load_controller_trust(data_dir: &Path) -> Result<Option<ControllerTrust>, String> {
+    load_controller_trust_for(data_dir, None)
 }
 
 pub fn save_controller_trust(data_dir: &Path, trust: &ControllerTrust) -> Result<(), String> {
     if !valid_trust(trust) {
         return Err("invalid_trust".into());
     }
-    let bytes = serde_json::to_vec(trust).map_err(|_| "secret_store_failed")?;
-    write_protected(&trust_path(data_dir, true), &bytes)
+    let mut entries = read_saved_computers(data_dir)?;
+    if let Some(index) = entries
+        .iter()
+        .position(|entry| entry.trust.host_id == trust.host_id)
+    {
+        let mut entry = entries.remove(index);
+        entry.trust = trust.clone();
+        entry.last_connected_at_ms = now_ms();
+        entries.insert(0, entry);
+    } else {
+        if entries.len() >= 64 {
+            return Err("saved_computers_full".into());
+        }
+        entries.insert(
+            0,
+            SavedComputer {
+                trust: trust.clone(),
+                name: default_computer_name(&trust.host_id),
+                last_connected_at_ms: now_ms(),
+            },
+        );
+    }
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn rename_saved_computer(data_dir: &Path, host_id: &str, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        return Err("invalid_name".into());
+    }
+    let mut entries = read_saved_computers(data_dir)?;
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.trust.host_id == host_id)
+        .ok_or("unknown_computer")?;
+    entry.name = name.to_owned();
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn touch_saved_computer(data_dir: &Path, host_id: &str, id: &str) -> Result<(), String> {
+    let mut entries = read_saved_computers(data_dir)?;
+    let index = entries
+        .iter()
+        .position(|entry| entry.trust.host_id == host_id && entry.trust.id == id)
+        .ok_or("unknown_computer")?;
+    let mut entry = entries.remove(index);
+    entry.last_connected_at_ms = now_ms();
+    entries.insert(0, entry);
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn forget_controller_trust_for(data_dir: &Path, host_id: &str) -> Result<(), String> {
+    let mut entries = read_saved_computers(data_dir)?;
+    entries.retain(|entry| entry.trust.host_id != host_id);
+    write_saved_computers(data_dir, &entries)
 }
 
 pub fn forget_controller_trust(data_dir: &Path) -> Result<(), String> {
-    let path = trust_path(data_dir, true);
-    if path.exists() {
-        fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+    let entries = read_saved_computers(data_dir)?;
+    if let Some(entry) = entries.first() {
+        forget_controller_trust_for(data_dir, &entry.trust.host_id)
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 fn secret_file() -> OpenOptions {
@@ -818,6 +976,10 @@ impl Authority {
             Self::revoke(&mut inner);
         }
         inner.grant.as_ref().map(|grant| grant.peer.clone())
+    }
+
+    pub fn has_trusted_pc(&self) -> bool {
+        self.0.lock().is_ok_and(|inner| inner.trusted.is_some())
     }
 
     pub fn disconnect(&self, peer: &str) {
