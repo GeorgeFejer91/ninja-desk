@@ -295,7 +295,9 @@ function scheduleTrusted() {
 }
 
 async function startMedia(password: string) {
+  const peer = activePeer;
   const room = await roomFromPassword(password);
+  if (stopped || !peer || activePeer !== peer) throw new Error("Media session canceled");
   const candidate = new VDONinja({ password, salt: "vdo.ninja" });
   mediaSdk = candidate;
   try {
@@ -332,6 +334,7 @@ async function startTrusted(route: TrustedRoute) {
   if (stopped || currentTrusted?.id !== route.id) return;
   const password = await routePasswordForAccessLink(route.secret);
   const room = await roomFromPassword(password);
+  if (stopped || currentTrusted?.id !== route.id) return;
   const candidate = new VDONinja({ password, salt: "vdo.ninja" });
   trustedSdk = candidate;
   bindControl(candidate, undefined, route.id);

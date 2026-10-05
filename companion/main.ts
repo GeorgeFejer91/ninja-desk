@@ -75,6 +75,7 @@ let usingTrusted = false;
 let manualDisconnect = false;
 let retryTimer: number | null = null;
 let retryDelay = 1000;
+let connectionGeneration = 0;
 let immersiveFallback = false;
 const maxZoom = 32;
 
@@ -89,6 +90,7 @@ function safeError(error: unknown): string {
 }
 
 function resetConnection(message: string) {
+  connectionGeneration++;
   const retry = usingTrusted && !!storedTrust && !manualDisconnect;
   cancelTouch();
   moveQueue.reset();
@@ -141,8 +143,9 @@ function resetConnection(message: string) {
   }
 }
 
-async function startMedia(password: string) {
+async function startMedia(password: string, control: VDONinja) {
   const mediaRoom = await roomFromPassword(password);
+  if (sdk !== control) return;
   const candidate = new VDONinja({ password, salt: "vdo.ninja" });
   mediaSdk = candidate;
   try {
@@ -300,7 +303,7 @@ async function handleData(transport: VDONinja, uuid: string, data: unknown) {
       passwordInput.value = "";
       setStatus("Connecting screen…");
       try {
-        await startMedia(data.mediaPassword);
+        await startMedia(data.mediaPassword, transport);
       } catch (error) {
         if (sdk !== transport) return;
         console.warn(`[client] screen connection failed: ${safeError(error)}`);
@@ -364,6 +367,7 @@ async function handleData(transport: VDONinja, uuid: string, data: unknown) {
 
 async function connect(password: string, viaLink = false, trustedId?: string) {
   if (connectButton.disabled) return;
+  const attemptGeneration = ++connectionGeneration;
   if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
   connectButton.disabled = true;
   usingAccessLink = viaLink;
@@ -371,7 +375,9 @@ async function connect(password: string, viaLink = false, trustedId?: string) {
   manualDisconnect = false;
   try {
     const routePassword = viaLink || trustedId ? await routePasswordForAccessLink(password) : password;
-    room = await roomFromPassword(routePassword);
+    const nextRoom = await roomFromPassword(routePassword);
+    if (connectionGeneration !== attemptGeneration) return;
+    room = nextRoom;
     passwordBytes = hexToBytes(password);
     clientNonce = nonce();
     clientUuid = null;
@@ -431,6 +437,7 @@ async function connect(password: string, viaLink = false, trustedId?: string) {
     await attempt.view(`host_${room}`, { audio: false, video: true });
     if (sdk === attempt && !sessionKey) setStatus("Checking access…");
   } catch (error) {
+    if (connectionGeneration !== attemptGeneration) return;
     console.warn(`[client] connection failed: ${safeError(error)}`);
     resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
   }
