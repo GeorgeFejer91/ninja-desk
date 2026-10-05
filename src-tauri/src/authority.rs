@@ -17,6 +17,8 @@ use windows_dpapi::{decrypt_data, encrypt_data, Scope};
 type HmacSha256 = Hmac<Sha256>;
 const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 const ACCESS_LINK_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+// One store owner across the main/controller WebViews and CLI status migration.
+static SAVED_COMPUTERS_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,7 +304,7 @@ fn read_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputer>, String> {
             || entries.iter().any(|entry| {
                 !valid_trust(&entry.trust)
                     || entry.name.trim().is_empty()
-                    || entry.name.len() > 64
+                    || entry.name.chars().count() > 80
                     || entry.name.chars().any(char::is_control)
             })
             || entries.iter().enumerate().any(|(index, entry)| {
@@ -337,17 +339,15 @@ fn read_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputer>, String> {
 
 fn write_saved_computers(data_dir: &Path, entries: &[SavedComputer]) -> Result<(), String> {
     let path = saved_computers_path(data_dir);
-    if entries.is_empty() {
-        if path.exists() {
-            fs::remove_file(path).map_err(|_| "secret_store_failed")?;
-        }
-        return Ok(());
-    }
+    // Keep the empty store so an old migration file cannot restore forgotten trust.
     let bytes = serde_json::to_vec(entries).map_err(|_| "secret_store_failed")?;
     write_protected(&path, &bytes)
 }
 
 pub fn list_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputerSummary>, String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
     Ok(read_saved_computers(data_dir)?
         .into_iter()
         .map(|entry| SavedComputerSummary {
@@ -362,6 +362,9 @@ pub fn load_controller_trust_for(
     data_dir: &Path,
     host_id: Option<&str>,
 ) -> Result<Option<ControllerTrust>, String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
     let entries = read_saved_computers(data_dir)?;
     Ok(match host_id {
         Some(id) => entries
@@ -372,11 +375,15 @@ pub fn load_controller_trust_for(
     })
 }
 
-pub fn load_controller_trust(data_dir: &Path) -> Result<Option<ControllerTrust>, String> {
+#[cfg(test)]
+fn load_controller_trust(data_dir: &Path) -> Result<Option<ControllerTrust>, String> {
     load_controller_trust_for(data_dir, None)
 }
 
 pub fn save_controller_trust(data_dir: &Path, trust: &ControllerTrust) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
     if !valid_trust(trust) {
         return Err("invalid_trust".into());
     }
@@ -406,8 +413,11 @@ pub fn save_controller_trust(data_dir: &Path, trust: &ControllerTrust) -> Result
 }
 
 pub fn rename_saved_computer(data_dir: &Path, host_id: &str, name: &str) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
     let name = name.trim();
-    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
         return Err("invalid_name".into());
     }
     let mut entries = read_saved_computers(data_dir)?;
@@ -420,6 +430,9 @@ pub fn rename_saved_computer(data_dir: &Path, host_id: &str, name: &str) -> Resu
 }
 
 pub fn touch_saved_computer(data_dir: &Path, host_id: &str, id: &str) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
     let mut entries = read_saved_computers(data_dir)?;
     let index = entries
         .iter()
@@ -432,18 +445,23 @@ pub fn touch_saved_computer(data_dir: &Path, host_id: &str, id: &str) -> Result<
 }
 
 pub fn forget_controller_trust_for(data_dir: &Path, host_id: &str) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
     let mut entries = read_saved_computers(data_dir)?;
     entries.retain(|entry| entry.trust.host_id != host_id);
     write_saved_computers(data_dir, &entries)
 }
 
 pub fn forget_controller_trust(data_dir: &Path) -> Result<(), String> {
-    let entries = read_saved_computers(data_dir)?;
-    if let Some(entry) = entries.first() {
-        forget_controller_trust_for(data_dir, &entry.trust.host_id)
-    } else {
-        Ok(())
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    let mut entries = read_saved_computers(data_dir)?;
+    if !entries.is_empty() {
+        entries.remove(0);
     }
+    write_saved_computers(data_dir, &entries)
 }
 
 fn secret_file() -> OpenOptions {
@@ -1254,6 +1272,63 @@ mod tests {
     }
 
     #[test]
+    fn saved_pc_migration_concurrent_updates_and_scoped_forget() {
+        let dir = std::env::temp_dir().join(format!("ninja-saved-pcs-{}", random_hex()));
+        fs::create_dir_all(&dir).unwrap();
+        let first = ControllerTrust {
+            id: "a".repeat(32),
+            secret: "b".repeat(64),
+            host_id: "c".repeat(32),
+        };
+        write_protected(
+            &trust_path(&dir, true),
+            &serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_controller_trust(&dir).unwrap().unwrap().host_id,
+            first.host_id
+        );
+        assert!(!trust_path(&dir, true).exists());
+        let second = ControllerTrust {
+            id: "d".repeat(32),
+            secret: "e".repeat(64),
+            host_id: "f".repeat(32),
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..10 {
+                    save_controller_trust(&dir, &first).unwrap();
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..10 {
+                    save_controller_trust(&dir, &second).unwrap();
+                }
+            });
+        });
+        assert_eq!(list_saved_computers(&dir).unwrap().len(), 2);
+        rename_saved_computer(&dir, &second.host_id, &"界".repeat(80)).unwrap();
+        assert!(rename_saved_computer(&dir, &second.host_id, &"界".repeat(81)).is_err());
+        forget_controller_trust_for(&dir, &first.host_id).unwrap();
+        assert!(touch_saved_computer(&dir, &first.host_id, &first.id).is_err());
+        assert!(load_controller_trust_for(&dir, Some(&second.host_id))
+            .unwrap()
+            .is_some());
+        forget_controller_trust_for(&dir, &second.host_id).unwrap();
+        // An old migration source left behind by a failed deletion cannot revive trust.
+        write_protected(
+            &trust_path(&dir, true),
+            &serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        assert!(load_controller_trust(&dir).unwrap().is_none());
+        fs::remove_file(trust_path(&dir, true)).unwrap();
+        fs::remove_file(saved_computers_path(&dir)).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
     fn trusted_desktop_survives_restart_and_revokes() {
         let dir = std::env::temp_dir().join(format!("ninja-trust-test-{}", random_hex()));
         let authority = Authority::load(&dir).unwrap();
@@ -1305,6 +1380,7 @@ mod tests {
             .is_err());
         forget_controller_trust(&dir).unwrap();
         assert!(load_controller_trust(&dir).unwrap().is_none());
+        fs::remove_file(saved_computers_path(&dir)).unwrap();
         fs::remove_file(secret_path(&dir)).unwrap();
         fs::remove_dir(dir).unwrap();
     }

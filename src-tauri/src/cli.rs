@@ -100,7 +100,7 @@ fn is_hex(value: &str, len: usize) -> bool {
     value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionEvent {
     request_id: String,
@@ -156,6 +156,11 @@ pub struct CliRuntime {
 }
 
 impl CliRuntime {
+    pub fn clear_report(&self, label: &str) {
+        if let Ok(mut reports) = self.reports.lock() {
+            reports.remove(label);
+        }
+    }
     pub fn report(&self, label: &str, status: RuntimeStatus) -> Result<(), String> {
         if !matches!(label, "main" | "controller") || !status.valid() {
             return Err("invalid_status".into());
@@ -340,7 +345,7 @@ fn status(app: &AppHandle, doctor: bool) -> WireResponse {
     };
     let authority = app.state::<Authority>();
     let frames = app.state::<FrameStore>().stats();
-    let capture_running = frames.sequence > 0;
+    let capture_running = !frames.paused && frames.last_frame_age_ms.is_some_and(|age| age <= 2000);
     let data_dir = app.path().app_data_dir().ok();
     let saved_count = data_dir
         .as_ref()
@@ -370,21 +375,30 @@ fn status(app: &AppHandle, doctor: bool) -> WireResponse {
 
 pub(crate) fn dispatch(app: &AppHandle, action: CliAction) -> WireResponse {
     let label = action.label();
+    if cfg!(target_os = "linux") && label == "controller" {
+        return WireResponse::error("use_browser_controller");
+    }
     if label == "controller" && crate::ensure_controller_window(app, false).is_err() {
         return WireResponse::error("window_failed");
     }
     let runtime = app.state::<CliRuntime>();
     if label == "controller" {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let ready = || {
+            runtime.reports.lock().is_ok_and(|reports| {
+                reports
+                    .get("controller")
+                    .is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(2))
+            })
+        };
         while Instant::now() < deadline {
-            if runtime
-                .reports
-                .lock()
-                .is_ok_and(|reports| reports.contains_key("controller"))
-            {
+            if ready() {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
+        }
+        if !ready() {
+            return WireResponse::error("runtime_unavailable");
         }
     }
     let request_id = hex::encode(rand::random::<[u8; 16]>());
@@ -565,6 +579,14 @@ fn parse_args(args: &[String]) -> Result<(String, Option<CliAction>), String> {
 
 pub fn cli_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--help"] || args.as_slice() == ["help"] {
+        println!("Ninja Desk CLI\nstatus [--json]\ndoctor [--json]\ncontroller connect [--device HOST_ID] [--password-stdin]\ncontroller disconnect\ncontroller forget [--device HOST_ID]\ncontroller probe\ncontroller clipboard-send --stdin\nhost pair approve\nhost pair revoke\nhost restart\n\nCommands return redacted JSON. Access codes and clipboard text are read only from stdin.");
+        return;
+    }
+    if args.as_slice() == ["--version"] {
+        println!("Ninja Desk {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let result = parse_args(&args).and_then(|(command, action)| send_request(&command, action));
     let response = result.unwrap_or_else(|code| WireResponse::error(&code));
     println!(
@@ -574,5 +596,28 @@ pub fn cli_main() {
     );
     if !response.ok {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_boundary_rejects_secret_arguments_and_unapproved_output() {
+        let args = ["controller", "connect", "--password", "secret"].map(String::from);
+        assert_eq!(
+            parse_args(&args).err().as_deref(),
+            Some("invalid_arguments")
+        );
+        let args = ["controller", "connect", "--device", "bad"].map(String::from);
+        assert!(parse_args(&args).is_err());
+        assert!(!safe_action_data(&json!({"secret":"private"})));
+        assert!(!safe_action_data(&json!({"roundTripMs":-1})));
+        assert!(safe_action_data(
+            &json!({"acknowledged":true,"roundTripMs":27})
+        ));
+        assert!(!token_matches(&"a".repeat(64), &"b".repeat(64)));
+        assert!(!token_matches(&"a".repeat(64), "a"));
     }
 }

@@ -63,10 +63,16 @@ pub(crate) fn ensure_controller_window(
         }
         return Ok(controller);
     }
+    app.state::<cli::CliRuntime>().clear_report("controller");
+    let controller_url = if visible {
+        "controller.html"
+    } else {
+        "controller.html?background=1"
+    };
     let controller = tauri::WebviewWindowBuilder::new(
         app,
         "controller",
-        tauri::WebviewUrl::App("controller.html".into()),
+        tauri::WebviewUrl::App(controller_url.into()),
     )
     .title("Ninja Desk — Control another PC")
     .inner_size(1100.0, 760.0)
@@ -81,16 +87,27 @@ pub(crate) fn ensure_controller_window(
 }
 
 #[tauri::command]
-fn open_controller(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+async fn open_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
     if window.label() != "main" {
         return Err("unavailable".into());
     }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg("https://georgefejer91.github.io/ninja-desk/")
+            .spawn()
+            .map_err(|_| "browser_open_failed")?;
+    }
+    #[cfg(not(target_os = "linux"))]
     ensure_controller_window(&app, true)?;
     Ok(())
 }
 
 #[tauri::command]
-fn connect_controller(
+async fn connect_controller(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     password: Option<String>,
@@ -625,6 +642,11 @@ pub fn run() {
             transport_mode
         ])
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                window
+                    .state::<cli::CliRuntime>()
+                    .clear_report(window.label());
+            }
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();

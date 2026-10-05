@@ -1,8 +1,9 @@
 [package]
 name = "ninja-desk"
-version = "0.1.3"
+version = "0.1.4"
 description = "Local desktop host for a browser controller"
 edition = "2021"
+default-run = "ninja-desk"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
