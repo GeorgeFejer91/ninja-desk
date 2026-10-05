@@ -14,7 +14,8 @@ export type RuntimeStatus = {
 
 export type CliAction =
   | { type: "controller_connect"; password?: string; hostId?: string }
-  | { type: "controller_disconnect" | "controller_forget" | "controller_probe" }
+  | { type: "controller_disconnect" | "controller_probe" }
+  | { type: "controller_forget"; hostId?: string }
   | { type: "controller_clipboard_send"; text: string }
   | { type: "host_pair_approve" | "host_pair_revoke" };
 

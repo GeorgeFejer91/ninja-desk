@@ -337,7 +337,7 @@ async function handleData(transport: VDONinja, uuid: string, data: unknown) {
       sessionSigner = signer;
       runtimePhase = "control_ready";
       if (usingTrusted && storedTrust && isTauri()) {
-        void nativeInvoke("save_trusted_controller", { trust: storedTrust }).catch(() => {});
+        void nativeInvoke("touch_saved_computer", { hostId: storedTrust.hostId, id: storedTrust.id }).catch(() => {});
       }
       if (typeof data.width === "number" && typeof data.height === "number" && typeof data.cursorX === "number" && typeof data.cursorY === "number" && Number.isFinite(data.width) && Number.isFinite(data.height) && Number.isFinite(data.cursorX) && Number.isFinite(data.cursorY) && data.width > 1 && data.height > 1) {
         lastPosition = {
@@ -518,12 +518,16 @@ else if (isTauri()) {
   }).catch(() => setStatus("Saved PC unavailable. Enter its password."));
 }
 
-async function forgetTrustedPc() {
+async function forgetTrustedPc(hostId = storedTrust?.hostId) {
+  if (hostId && storedTrust?.hostId !== hostId) {
+    await nativeInvoke("forget_trusted_controller", { hostId });
+    return;
+  }
   manualDisconnect = true;
   if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
   resetConnection("Saved PC forgotten");
   try {
-    await nativeInvoke("forget_trusted_controller");
+    await nativeInvoke("forget_trusted_controller", { hostId });
     storedTrust = null;
     usingTrusted = false;
     if (forgetTrustedButton) forgetTrustedButton.hidden = true;
@@ -889,7 +893,7 @@ void startCliBridge(controllerRuntime, async (action): Promise<CliResult> => {
       return { ok: true, data: { accepted: true } };
     }
     case "controller_disconnect": disconnectController(); return { ok: true };
-    case "controller_forget": await forgetTrustedPc(); return { ok: true };
+    case "controller_forget": await forgetTrustedPc(action.hostId); return { ok: true };
     case "controller_probe": {
       if (!sessionKey) return { ok: false, code: "not_connected" };
       const startedAt = performance.now();
