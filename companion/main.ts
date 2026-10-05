@@ -173,6 +173,9 @@ async function startMedia(password: string) {
     candidate.on("peerDisconnected", () => {
       if (mediaSdk === candidate) resetConnection("Remote PC disconnected");
     });
+    candidate.on("reconnectFailed", () => {
+      if (mediaSdk === candidate) resetConnection("Screen connection interrupted. Reconnecting…");
+    });
     await candidate.connect();
     if (mediaSdk !== candidate) return;
     await candidate.joinRoom({ room: mediaRoom, password });
@@ -250,18 +253,22 @@ function point(event: PointerEvent | WheelEvent, allowOutside = false): { x: num
   return screenPoint(view(), local.x, local.y, allowOutside);
 }
 
-async function handleData(uuid: string, data: unknown) {
-  if (!isRecord(data) || uuid !== hostUuid) return;
+async function handleData(transport: VDONinja, uuid: string, data: unknown) {
+  if (sdk !== transport || !isRecord(data) || uuid !== hostUuid) return;
   try {
     if (data.type === "auth_challenge" && typeof data.nonce === "string" && typeof data.generation === "string" && typeof data.hostCert === "string" && typeof data.clientCert === "string" && typeof data.peer === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(data.peer) && passwordBytes && sdk) {
       console.info("[client] checking certificate fingerprints");
-      const pair = await fingerprints(sdk, uuid, "viewer");
+      const password = passwordBytes;
+      const pair = await fingerprints(transport, uuid, "viewer");
+      if (sdk !== transport || passwordBytes !== password) return;
       console.info("[client] certificate fingerprints ready");
       if (pair.remote !== data.hostCert || pair.local !== data.clientCert) throw new Error("WebRTC peer mismatch");
       generation = data.generation;
       clientUuid = data.peer;
       authTranscript = transcript(room, generation, clientUuid, data.nonce, clientNonce, data.hostCert, data.clientCert);
-      send({ type: "auth_proof", clientNonce, proof: await hmacHex(passwordBytes, `client|${authTranscript}`) });
+      const proof = await hmacHex(password, `client|${authTranscript}`);
+      if (sdk !== transport || passwordBytes !== password) return;
+      send({ type: "auth_proof", clientNonce, proof });
       console.info("[client] proof sent");
       return;
     }
@@ -269,15 +276,21 @@ async function handleData(uuid: string, data: unknown) {
       console.warn(`[client] incomplete challenge: fields=${typeof data.nonce}/${typeof data.generation}/${typeof data.hostCert}/${typeof data.clientCert}/${typeof data.peer}`);
     }
     if (data.type === "auth_ok" && typeof data.proof === "string" && typeof data.mediaPassword === "string" && passwordBytes) {
-      const expected = await hmacHex(passwordBytes, `host|${authTranscript}`);
+      const password = passwordBytes;
+      const currentTranscript = authTranscript;
+      const expected = await hmacHex(password, `host|${currentTranscript}`);
+      if (sdk !== transport || passwordBytes !== password) return;
       if (data.proof !== expected) throw new Error("Host proof failed");
       if (usingTrusted && storedTrust && data.hostId !== storedTrust.hostId) {
         manualDisconnect = true;
         throw new Error("Trusted host identity changed");
       }
       if (!/^[0-9a-f]{64}$/.test(data.mediaPassword)) throw new Error("Invalid media grant");
-      sessionKey = await hmacBytes(passwordBytes, `session|${authTranscript}`);
-      if (data.mediaPassword !== await hmacHex(sessionKey, "media|v1")) throw new Error("Media grant mismatch");
+      const key = await hmacBytes(password, `session|${currentTranscript}`);
+      const mediaPassword = await hmacHex(key, "media|v1");
+      if (sdk !== transport || passwordBytes !== password) return;
+      if (data.mediaPassword !== mediaPassword) throw new Error("Media grant mismatch");
+      sessionKey = key;
       if (typeof data.width === "number" && typeof data.height === "number" && typeof data.cursorX === "number" && typeof data.cursorY === "number" && Number.isFinite(data.width) && Number.isFinite(data.height) && Number.isFinite(data.cursorX) && Number.isFinite(data.cursorY) && data.width > 1 && data.height > 1) {
         lastPosition = {
           x: clamp(Math.round(data.cursorX * 65535 / (data.width - 1)), 0, 65535),
@@ -289,6 +302,7 @@ async function handleData(uuid: string, data: unknown) {
       try {
         await startMedia(data.mediaPassword);
       } catch (error) {
+        if (sdk !== transport) return;
         console.warn(`[client] screen connection failed: ${safeError(error)}`);
         resetConnection("Could not start screen");
       }
@@ -305,7 +319,7 @@ async function handleData(uuid: string, data: unknown) {
     }
     if (data.type === "trusted_revoked" && usingTrusted) {
       manualDisconnect = true;
-      resetConnection("Tower revoked this PC. Enter the password to pair again.");
+      resetConnection("The remote PC revoked access. Enter its password to pair again.");
       return;
     }
     if (data.type === "session_expired") {
@@ -318,11 +332,14 @@ async function handleData(uuid: string, data: unknown) {
         typeof data.secret === "string" && /^[0-9a-f]{64}$/.test(data.secret) &&
         typeof data.hostId === "string" && /^[0-9a-f]{32}$/.test(data.hostId) &&
         typeof data.mac === "string" && /^[0-9a-f]{64}$/.test(data.mac)) {
-      const expected = await hmacHex(sessionKey, `trusted|${data.hostId}|${data.id}|${data.secret}|${generation}|${clientUuid}`);
+      const key = sessionKey;
+      const expected = await hmacHex(key, `trusted|${data.hostId}|${data.id}|${data.secret}|${generation}|${clientUuid}`);
+      if (sdk !== transport || sessionKey !== key) return;
       if (data.mac !== expected) throw new Error("Invalid trust grant");
       const trust = { id: data.id, secret: data.secret, hostId: data.hostId };
       await nativeInvoke("save_trusted_controller", { trust });
       storedTrust = trust;
+      if (sdk !== transport || sessionKey !== key) return;
       usingTrusted = true;
       manualDisconnect = false;
       if (forgetTrustedButton) forgetTrustedButton.hidden = false;
@@ -339,6 +356,7 @@ async function handleData(uuid: string, data: unknown) {
       if (data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
     }
   } catch (error) {
+    if (sdk !== transport) return;
     console.warn(`[client] authentication failed: ${safeError(error)}`);
     resetConnection("Authentication failed");
   }
@@ -370,6 +388,9 @@ async function connect(password: string, viaLink = false, trustedId?: string) {
     });
     sdk.on("reconnecting", () => console.info("[client] reconnecting"));
     sdk.on("disconnected", () => console.info("[client] signaling disconnected"));
+    sdk.on("reconnectFailed", () => {
+      if (sdk === attempt) resetConnection("Connection interrupted. Reconnecting…");
+    });
     sdk.on("dataChannelOpen", (opened) => {
       if (sdk !== attempt) return;
       if (opened.detail.uuid === hostUuid || hostUuid === null) {
@@ -390,7 +411,7 @@ async function connect(password: string, viaLink = false, trustedId?: string) {
       if (isRecord(received.detail.data) && typeof received.detail.data.type === "string") {
         console.info(`[client] message: ${received.detail.data.type}`);
       }
-      if (!received.detail.fallback) void handleData(received.detail.uuid, received.detail.data);
+      if (!received.detail.fallback) void handleData(attempt, received.detail.uuid, received.detail.data);
     });
     sdk.on("track", (received) => {
       if (sdk !== attempt) return;
@@ -399,7 +420,7 @@ async function connect(password: string, viaLink = false, trustedId?: string) {
     sdk.on("peerDisconnected", (lost) => {
       if (sdk !== attempt) return;
       if (lost.detail.uuid === hostUuid) {
-        resetConnection("Laptop disconnected");
+        resetConnection("Remote PC disconnected");
       }
     });
     setStatus(viaLink ? "Connecting with access link…" : "Connecting…");
