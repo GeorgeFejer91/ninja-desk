@@ -424,7 +424,9 @@ async function start() {
   passwordField.value = config.password;
   currentTrusted = config.trusted;
   revokeTrustButton.hidden = !currentTrusted;
-  if (await invoke<string>("transport_mode") === "external") {
+  const transportMode = await invoke<string>("transport_mode");
+  if (transportMode === "external" || transportMode === "browser") useBrowserConnections();
+  if (transportMode === "external") {
     openHostButton.hidden = false;
     fastCaptureButton.hidden = true;
     lowDataButton.hidden = true;
@@ -761,6 +763,23 @@ let savedPage = 0;
 let savedPageSize = 1;
 let savedPageBudget = 0;
 let loadingSaved = false;
+let browserConnections = false;
+
+function useBrowserConnections() {
+  browserConnections = true;
+  quickConnect.hidden = true;
+  document.querySelector<HTMLElement>(".saved-computers")!.hidden = true;
+  const section = document.createElement("section");
+  const heading = document.createElement("h2");
+  heading.dataset.fit = "";
+  heading.textContent = "Browser connections";
+  const detail = document.createElement("p");
+  detail.dataset.fit = "";
+  detail.textContent = "Open the browser controller to connect to another computer using its access code.";
+  section.append(heading, controlButton, detail);
+  if (openHostButton.hidden === false) section.append(openHostButton);
+  document.querySelector(".remote-desktop")!.append(section);
+}
 
 settingsToggle.addEventListener("click", () => {
   const show = settingsPanel.hidden;
@@ -872,7 +891,7 @@ function renderSavedComputers() {
 }
 
 async function refreshSavedComputers() {
-  if (loadingSaved) return;
+  if (loadingSaved || browserConnections) return;
   loadingSaved = true;
   try {
     const next = await invoke<SavedComputer[]>("list_saved_computers");
