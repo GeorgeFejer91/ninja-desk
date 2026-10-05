@@ -1,5 +1,6 @@
 import VDONinja from "@vdoninja/sdk";
 import { invoke as nativeInvoke, isTauri } from "@tauri-apps/api/core";
+import { listen as nativeListen } from "@tauri-apps/api/event";
 import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
 import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, importHmacKey, isRecord, mouseMessage, nonce, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from "../src/protocol";
@@ -906,3 +907,17 @@ void startCliBridge(controllerRuntime, async (action): Promise<CliResult> => {
     default: return { ok: false, code: "wrong_window" };
   }
 }).catch(() => {});
+
+if (isTauri()) {
+  let closed = false;
+  let removeListener: (() => void) | null = null;
+  window.addEventListener("pagehide", () => { closed = true; removeListener?.(); }, { once: true });
+  void nativeListen<{ hostId: string }>("ninja-saved-computer-forgotten", ({ payload }) => {
+    if (!/^[0-9a-f]{32}$/.test(payload.hostId) || storedTrust?.hostId !== payload.hostId) return;
+    disconnectController();
+    storedTrust = null;
+    usingTrusted = false;
+    if (forgetTrustedButton) forgetTrustedButton.hidden = true;
+    setStatus("Saved PC forgotten");
+  }).then(unlisten => { if (closed) unlisten(); else removeListener = unlisten; }).catch(() => {});
+}
