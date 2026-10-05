@@ -23,7 +23,7 @@ export type CliResult = { ok: boolean; code?: string; data?: Record<string, bool
 
 // Local IPC reaches the same handlers as the installed UI. No browser binding
 // and no generic command forwarding are exposed by this diagnostic adapter.
-export async function startCliBridge(snapshot: () => RuntimeStatus | Promise<RuntimeStatus>, apply: (action: CliAction) => Promise<CliResult>) {
+export async function startCliBridge(snapshot: () => RuntimeStatus | Promise<RuntimeStatus>, apply: (action: CliAction, automation: boolean) => Promise<CliResult>) {
   if (!isTauri()) return;
   let reporting = false;
   let busy = false;
@@ -42,12 +42,12 @@ export async function startCliBridge(snapshot: () => RuntimeStatus | Promise<Run
     catch { /* Older runtimes do not implement the optional CLI adapter. */ }
     finally { reporting = false; }
   };
-  const unlisten = await listen<{ requestId: string; action: CliAction }>("ninja-cli-action", async ({ payload }) => {
+  const unlisten = await listen<{ requestId: string; action: CliAction; automation: boolean }>("ninja-cli-action", async ({ payload }) => {
     if (!/^[0-9a-f]{32}$/.test(payload.requestId)) return;
     let result: CliResult = { ok: false, code: "busy" };
     if (!busy) {
       busy = true;
-      try { result = await apply(payload.action); }
+      try { result = await apply(payload.action, payload.automation === true); }
       catch { result = { ok: false, code: "action_failed" }; }
       finally { busy = false; }
     }

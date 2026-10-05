@@ -55,14 +55,14 @@ impl RuntimeStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CliAction {
     ControllerConnect {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         password: Option<String>,
-        #[serde(default, rename = "hostId")]
+        #[serde(default, rename = "hostId", skip_serializing_if = "Option::is_none")]
         host_id: Option<String>,
     },
     ControllerDisconnect,
     ControllerForget {
-        #[serde(default, rename = "hostId")]
+        #[serde(default, rename = "hostId", skip_serializing_if = "Option::is_none")]
         host_id: Option<String>,
     },
     ControllerProbe,
@@ -105,6 +105,7 @@ fn is_hex(value: &str, len: usize) -> bool {
 struct ActionEvent {
     request_id: String,
     action: CliAction,
+    automation: bool,
 }
 
 #[derive(Deserialize)]
@@ -311,7 +312,7 @@ fn serve_one(mut stream: TcpStream, app: &AppHandle, token: &str) -> Result<(), 
             match request.command.as_str() {
                 "status" | "doctor" => status(app, request.command == "doctor"),
                 "action" => match request.action {
-                    Some(action) if action.valid() => dispatch(app, action),
+                    Some(action) if action.valid() => dispatch(app, action, true),
                     _ => WireResponse::error("invalid_action"),
                 },
                 "host_restart" => {
@@ -373,7 +374,7 @@ fn status(app: &AppHandle, doctor: bool) -> WireResponse {
     }))
 }
 
-pub(crate) fn dispatch(app: &AppHandle, action: CliAction) -> WireResponse {
+pub(crate) fn dispatch(app: &AppHandle, action: CliAction, automation: bool) -> WireResponse {
     let label = action.label();
     if cfg!(target_os = "linux") && label == "controller" {
         return WireResponse::error("use_browser_controller");
@@ -414,6 +415,7 @@ pub(crate) fn dispatch(app: &AppHandle, action: CliAction) -> WireResponse {
     let event = ActionEvent {
         request_id: request_id.clone(),
         action,
+        automation,
     };
     if app.emit_to(label, "ninja-cli-action", event).is_err() {
         if let Ok(mut pending) = runtime.pending.lock() {
@@ -602,6 +604,20 @@ pub fn cli_main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_reconnect_omits_absent_password_for_the_frontend() {
+        let (_, action) = parse_args(&["controller".into(), "connect".into()]).unwrap();
+        let payload = serde_json::to_value(action.unwrap()).unwrap();
+        assert_eq!(payload, json!({"type":"controller_connect"}));
+        let action = CliAction::ControllerConnect {
+            password: None,
+            host_id: Some("a".repeat(32)),
+        };
+        let payload = serde_json::to_value(action).unwrap();
+        assert!(payload.get("password").is_none());
+        assert_eq!(payload["hostId"], "a".repeat(32));
+    }
 
     #[test]
     fn console_boundary_rejects_secret_arguments_and_unapproved_output() {

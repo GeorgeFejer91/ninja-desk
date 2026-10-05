@@ -598,7 +598,7 @@ document.addEventListener("fullscreenchange", syncFullscreen);
 document.addEventListener("keydown", (event) => {
   if (event.altKey && event.code === "KeyF" && !event.ctrlKey && !event.metaKey) {
     event.preventDefault();
-    if (!event.repeat && (!session.hidden || nativeFullscreen)) void toggleFullscreen();
+    if (!event.repeat && (isTauri() || !session.hidden || nativeFullscreen)) void toggleFullscreen();
   }
   if (event.key === "Escape" && nativeFullscreen) { event.preventDefault(); void toggleFullscreen(); }
   if (event.key === "Escape" && immersiveFallback) { immersiveFallback = false; syncFullscreen(); }
@@ -877,8 +877,8 @@ async function controllerRuntime(): Promise<RuntimeStatus> {
   };
 }
 
-void startCliBridge(controllerRuntime, async (action): Promise<CliResult> => {
-  automationMode = true;
+void startCliBridge(controllerRuntime, async (action, automation): Promise<CliResult> => {
+  automationMode = automation;
   switch (action.type) {
     case "controller_connect": {
       if (action.password !== undefined && !/^[0-9a-f]{64}$/.test(action.password)) return { ok: false, code: "invalid_password" };

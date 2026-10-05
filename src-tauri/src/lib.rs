@@ -122,7 +122,7 @@ async fn connect_controller(
     }
     ensure_controller_window(&app, true)?;
     std::thread::spawn(move || {
-        let _ = cli::dispatch(&app, action);
+        let _ = cli::dispatch(&app, action, false);
     });
     Ok(())
 }
