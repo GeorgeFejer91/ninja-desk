@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,6 +25,32 @@ pub struct Bootstrap {
     pub stream_id: String,
     pub password: String,
     pub generation: String,
+    pub host_id: String,
+    pub trusted: Option<TrustedRoute>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedRoute {
+    pub id: String,
+    pub secret: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedGrant {
+    pub id: String,
+    pub secret: String,
+    pub host_id: String,
+    pub mac: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerTrust {
+    pub id: String,
+    pub secret: String,
+    pub host_id: String,
 }
 
 #[derive(Serialize)]
@@ -45,6 +71,7 @@ pub struct AuthResult {
     pub cursor_x: i32,
     pub cursor_y: i32,
     pub media_password: String,
+    pub host_id: String,
 }
 
 #[derive(Serialize)]
@@ -85,6 +112,7 @@ struct Pending {
     key: [u8; 32],
     room: String,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 }
 
 struct Grant {
@@ -93,6 +121,7 @@ struct Grant {
     seq: u64,
     expires: Instant,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
     display: (i32, i32),
 }
 
@@ -106,6 +135,8 @@ struct Invite {
 struct Inner {
     bootstrap: Bootstrap,
     secret: [u8; 32],
+    data_dir: PathBuf,
+    trusted: Option<TrustedRoute>,
     invite: Option<Invite>,
     pending: Option<Pending>,
     grant: Option<Grant>,
@@ -152,7 +183,19 @@ fn secret_path(data_dir: &Path) -> std::path::PathBuf {
     }
 }
 
-fn encode_secret(secret: &[u8; 32]) -> Result<Vec<u8>, String> {
+fn trust_path(data_dir: &Path, controller: bool) -> PathBuf {
+    let name = if controller {
+        "controller-trust"
+    } else {
+        "trusted-desktop"
+    };
+    data_dir.join(format!(
+        "{name}.{}",
+        if cfg!(windows) { "dpapi" } else { "bin" }
+    ))
+}
+
+fn encode_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
     #[cfg(windows)]
     {
         encrypt_data(secret, Scope::User, None).map_err(|_| "secret_store_failed".into())
@@ -161,6 +204,88 @@ fn encode_secret(secret: &[u8; 32]) -> Result<Vec<u8>, String> {
     {
         Ok(secret.to_vec())
     }
+}
+
+fn read_protected(path: &Path) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(path).map_err(|_| "secret_store_failed")?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err("secret_store_invalid".into());
+        }
+    }
+    let encrypted = fs::read(path).map_err(|_| "secret_store_failed")?;
+    if encrypted.is_empty() || encrypted.len() > 4096 {
+        return Err("secret_store_invalid".into());
+    }
+    #[cfg(windows)]
+    {
+        decrypt_data(&encrypted, Scope::User, None).map_err(|_| "secret_store_invalid".into())
+    }
+    #[cfg(unix)]
+    {
+        Ok(encrypted)
+    }
+}
+
+fn write_protected(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let encoded = encode_secret(bytes)?;
+    let temp = path.with_extension(format!("{}.tmp", random_hex()));
+    let result = (|| -> Result<(), String> {
+        let mut file = secret_file()
+            .open(&temp)
+            .map_err(|_| "secret_store_failed")?;
+        file.write_all(&encoded)
+            .map_err(|_| "secret_store_failed")?;
+        file.sync_all().map_err(|_| "secret_store_failed")?;
+        drop(file);
+        if path.exists() {
+            fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+        }
+        fs::rename(&temp, path).map_err(|_| "secret_store_failed".into())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+fn valid_trust(trust: &ControllerTrust) -> bool {
+    trust.id.len() == 32
+        && trust.id.bytes().all(|b| b.is_ascii_hexdigit())
+        && trust.secret.len() == 64
+        && trust.secret.bytes().all(|b| b.is_ascii_hexdigit())
+        && trust.host_id.len() == 32
+        && trust.host_id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn load_controller_trust(data_dir: &Path) -> Result<Option<ControllerTrust>, String> {
+    let path = trust_path(data_dir, true);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let trust: ControllerTrust =
+        serde_json::from_slice(&read_protected(&path)?).map_err(|_| "secret_store_invalid")?;
+    if !valid_trust(&trust) {
+        return Err("secret_store_invalid".into());
+    }
+    Ok(Some(trust))
+}
+
+pub fn save_controller_trust(data_dir: &Path, trust: &ControllerTrust) -> Result<(), String> {
+    if !valid_trust(trust) {
+        return Err("invalid_trust".into());
+    }
+    let bytes = serde_json::to_vec(trust).map_err(|_| "secret_store_failed")?;
+    write_protected(&trust_path(data_dir, true), &bytes)
+}
+
+pub fn forget_controller_trust(data_dir: &Path) -> Result<(), String> {
+    let path = trust_path(data_dir, true);
+    if path.exists() {
+        fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+    }
+    Ok(())
 }
 
 fn secret_file() -> OpenOptions {
@@ -193,39 +318,49 @@ impl Authority {
                 Err(_) => return Err("secret_store_failed".into()),
             }
         };
-        Ok(Self::from_secret(secret))
+        let trust_file = trust_path(data_dir, false);
+        let trusted = if trust_file.exists() {
+            let record: TrustedRoute = serde_json::from_slice(&read_protected(&trust_file)?)
+                .map_err(|_| "secret_store_invalid")?;
+            if !valid_trust(&ControllerTrust {
+                id: record.id.clone(),
+                secret: record.secret.clone(),
+                host_id: hex::encode(Sha256::digest(secret))[..32].to_owned(),
+            }) {
+                return Err("secret_store_invalid".into());
+            }
+            Some(record)
+        } else {
+            None
+        };
+        Ok(Self::from_parts(secret, data_dir.to_path_buf(), trusted))
     }
 
     fn read_secret(path: &Path) -> Result<[u8; 32], String> {
-        #[cfg(unix)]
-        {
-            let metadata = fs::symlink_metadata(path).map_err(|_| "secret_store_failed")?;
-            if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
-                return Err("secret_store_invalid".into());
-            }
-        }
-        let encrypted = fs::read(path).map_err(|_| "secret_store_failed")?;
-        if encrypted.is_empty() || encrypted.len() > 4096 {
-            return Err("secret_store_invalid".into());
-        }
-        #[cfg(windows)]
-        let raw =
-            decrypt_data(&encrypted, Scope::User, None).map_err(|_| "secret_store_invalid")?;
-        #[cfg(unix)]
-        let raw = encrypted;
-        raw.try_into().map_err(|_| "secret_store_invalid".into())
+        read_protected(path)?
+            .try_into()
+            .map_err(|_| "secret_store_invalid".into())
     }
 
+    #[cfg(test)]
     fn from_secret(secret: [u8; 32]) -> Self {
+        Self::from_parts(secret, PathBuf::new(), None)
+    }
+
+    fn from_parts(secret: [u8; 32], data_dir: PathBuf, trusted: Option<TrustedRoute>) -> Self {
         let room = hex::encode(Sha256::digest(secret))[..32].to_owned();
         Self(Mutex::new(Inner {
             bootstrap: Bootstrap {
                 stream_id: format!("host_{room}"),
+                host_id: room.clone(),
                 room,
                 password: hex::encode(secret),
                 generation: random_hex(),
+                trusted: trusted.clone(),
             },
             secret,
+            data_dir,
+            trusted,
             invite: None,
             pending: None,
             grant: None,
@@ -244,7 +379,62 @@ impl Authority {
             stream_id: inner.bootstrap.stream_id.clone(),
             password: inner.bootstrap.password.clone(),
             generation: inner.bootstrap.generation.clone(),
+            host_id: inner.bootstrap.host_id.clone(),
+            trusted: inner.trusted.clone(),
         })
+    }
+
+    pub fn approve_trusted_pc(&self, peer: &str) -> Result<TrustedGrant, String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        if !inner.available || inner.data_dir.as_os_str().is_empty() {
+            return Err("unavailable".into());
+        }
+        let grant = inner
+            .grant
+            .as_ref()
+            .filter(|grant| grant.peer == peer && grant.trusted_id.is_none())
+            .ok_or("unauthorized")?;
+        let key = grant.key;
+        let id = random_hex();
+        let secret = hex::encode(rand::random::<[u8; 32]>());
+        let trusted = TrustedRoute {
+            id: id.clone(),
+            secret: secret.clone(),
+        };
+        let bytes = serde_json::to_vec(&trusted).map_err(|_| "secret_store_failed")?;
+        write_protected(&trust_path(&inner.data_dir, false), &bytes)?;
+        inner.trusted = Some(trusted);
+        let host_id = inner.bootstrap.host_id.clone();
+        let mac = hex::encode(hmac(
+            &key,
+            &format!(
+                "trusted|{host_id}|{id}|{secret}|{}|{peer}",
+                inner.bootstrap.generation
+            ),
+        ));
+        Ok(TrustedGrant {
+            id,
+            secret,
+            host_id,
+            mac,
+        })
+    }
+
+    pub fn revoke_trusted_pc(&self) -> Result<(), String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        let path = trust_path(&inner.data_dir, false);
+        if path.exists() {
+            fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+        }
+        inner.trusted = None;
+        if inner
+            .grant
+            .as_ref()
+            .is_some_and(|grant| grant.trusted_id.is_some())
+        {
+            Self::revoke(&mut inner);
+        }
+        Ok(())
     }
 
     pub fn create_access_link(&self) -> Result<AccessLink, String> {
@@ -302,6 +492,7 @@ impl Authority {
         host_cert: String,
         client_cert: String,
         invite_id: Option<String>,
+        trusted_id: Option<String>,
     ) -> Result<Challenge, String> {
         let valid_cert =
             |cert: &str| cert.len() == 64 && cert.bytes().all(|b| b.is_ascii_hexdigit());
@@ -312,6 +503,9 @@ impl Authority {
         if !inner.available || inner.grant.is_some() {
             return Err("unavailable".into());
         }
+        if invite_id.is_some() && trusted_id.is_some() {
+            return Err("invalid_auth".into());
+        }
         let (key, room) = match invite_id.as_deref() {
             Some(id) => {
                 let invite = inner
@@ -321,7 +515,21 @@ impl Authority {
                     .ok_or("invalid_link")?;
                 (invite.secret, invite.room.clone())
             }
-            None => (inner.secret, inner.bootstrap.room.clone()),
+            None => match trusted_id.as_deref() {
+                Some(id) => {
+                    let trusted = inner
+                        .trusted
+                        .as_ref()
+                        .filter(|trusted| trusted.id == id)
+                        .ok_or("invalid_trust")?;
+                    let secret: [u8; 32] = hex::decode(&trusted.secret)
+                        .map_err(|_| "invalid_trust")?
+                        .try_into()
+                        .map_err(|_| "invalid_trust")?;
+                    (secret, invite_room(&secret))
+                }
+                None => (inner.secret, inner.bootstrap.room.clone()),
+            },
         };
         let nonce = random_hex();
         inner.pending = Some(Pending {
@@ -333,6 +541,7 @@ impl Authority {
             key,
             room,
             invite_id,
+            trusted_id,
         });
         Ok(Challenge {
             nonce,
@@ -348,6 +557,7 @@ impl Authority {
         client_nonce: String,
         proof: String,
         invite_id: Option<String>,
+        trusted_id: Option<String>,
     ) -> Result<AuthResult, String> {
         if !valid_peer(&peer)
             || client_nonce.len() != 32
@@ -363,6 +573,7 @@ impl Authority {
         let pending = inner.pending.take().ok_or("invalid_auth")?;
         if pending.peer != peer
             || pending.invite_id != invite_id
+            || pending.trusted_id != trusted_id
             || pending.started.elapsed() > Duration::from_secs(30)
         {
             return Err("invalid_auth".into());
@@ -378,6 +589,14 @@ impl Authority {
             }
             None => Instant::now() + ACCESS_LINK_LIFETIME,
         };
+        if pending.trusted_id.as_deref().is_some_and(|id| {
+            inner
+                .trusted
+                .as_ref()
+                .is_none_or(|trusted| trusted.id != id)
+        }) {
+            return Err("invalid_trust".into());
+        }
         let transcript = format!(
             "v1|{}|{}|{}|{}|{}|{}|{}",
             pending.room,
@@ -411,6 +630,7 @@ impl Authority {
             seq: 0,
             expires,
             invite_id,
+            trusted_id,
             display,
         });
         inner.last_clipboard = None;
@@ -421,6 +641,7 @@ impl Authority {
             cursor_x: cursor.0,
             cursor_y: cursor.1,
             media_password,
+            host_id: inner.bootstrap.host_id.clone(),
         })
     }
 
@@ -616,6 +837,11 @@ impl Authority {
         inner.available = false;
         Self::clear_invite(&mut inner);
         Self::revoke(&mut inner);
+        let trust_file = trust_path(data_dir, false);
+        if trust_file.exists() {
+            fs::remove_file(trust_file).map_err(|_| "secret_store_failed")?;
+        }
+        inner.trusted = None;
         let fresh = rand::random::<[u8; 32]>();
         let encoded = encode_secret(&fresh)?;
         let temp = data_dir.join(format!("access-secret-{}.tmp", random_hex()));
@@ -679,15 +905,27 @@ mod tests {
         assert!(valid_peer("browser_1"));
         let authority = Authority::from_secret([7; 32]);
         assert!(authority
-            .begin_auth("../../x".into(), "0".repeat(64), "1".repeat(64), None)
+            .begin_auth("../../x".into(), "0".repeat(64), "1".repeat(64), None, None)
             .is_err());
         let challenge = authority
-            .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64), None)
+            .begin_auth(
+                "browser_1".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(challenge.host_cert, "0".repeat(64));
         assert_eq!(challenge.client_cert, "1".repeat(64));
         assert!(authority
-            .finish_auth("browser_1".into(), "2".repeat(32), "3".repeat(64), None)
+            .finish_auth(
+                "browser_1".into(),
+                "2".repeat(32),
+                "3".repeat(64),
+                None,
+                None
+            )
             .is_err());
     }
 
@@ -702,6 +940,7 @@ mod tests {
             seq: 0,
             expires: Instant::now() + ACCESS_LINK_LIFETIME,
             invite_id: None,
+            trusted_id: None,
             display: (1920, 1080),
         });
         let message = "mouse|generation|browser_1|1|1|1|1|0";
@@ -721,7 +960,13 @@ mod tests {
         first.replace_password(&dir).unwrap();
         assert_eq!(
             first
-                .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64), None)
+                .begin_auth(
+                    "browser_1".into(),
+                    "0".repeat(64),
+                    "1".repeat(64),
+                    None,
+                    None
+                )
                 .err()
                 .unwrap(),
             "unavailable"
@@ -746,6 +991,7 @@ mod tests {
                 "0".repeat(64),
                 "1".repeat(64),
                 Some(first.id.clone()),
+                None,
             )
             .unwrap();
         let inner = authority.0.lock().unwrap();
@@ -763,7 +1009,8 @@ mod tests {
                 "browser_1".into(),
                 "2".repeat(32),
                 "3".repeat(64),
-                Some(first.id)
+                Some(first.id),
+                None,
             )
             .is_err());
         authority.revoke_access_link(&second.id);
@@ -773,7 +1020,8 @@ mod tests {
                 "browser_1".into(),
                 "0".repeat(64),
                 "1".repeat(64),
-                Some(second.id)
+                Some(second.id),
+                None,
             )
             .is_err());
 
@@ -795,6 +1043,7 @@ mod tests {
                 seq: 0,
                 expires: Instant::now() + ACCESS_LINK_LIFETIME,
                 invite_id: Some(link.id.clone()),
+                trusted_id: None,
                 display: (1920, 1080),
             });
         }
@@ -808,6 +1057,7 @@ mod tests {
             seq: 0,
             expires: Instant::now() + ACCESS_LINK_LIFETIME,
             invite_id: None,
+            trusted_id: None,
             display: (1920, 1080),
         });
         authority.revoke_access_link(&another.id);
@@ -825,6 +1075,7 @@ mod tests {
             seq: 0,
             expires: Instant::now() - Duration::from_secs(1),
             invite_id: None,
+            trusted_id: None,
             display: (1920, 1080),
         });
         let message = "mouse|generation|browser_1|1|1|1|1|0";
@@ -834,5 +1085,61 @@ mod tests {
             "unauthorized"
         );
         assert!(inner.grant.is_none());
+    }
+
+    #[test]
+    fn trusted_desktop_survives_restart_and_revokes() {
+        let dir = std::env::temp_dir().join(format!("ninja-trust-test-{}", random_hex()));
+        let authority = Authority::load(&dir).unwrap();
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "desktop_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+        }
+        let grant = authority.approve_trusted_pc("desktop_1").unwrap();
+        assert_eq!(grant.mac.len(), 64);
+        let controller = ControllerTrust {
+            id: grant.id.clone(),
+            secret: grant.secret.clone(),
+            host_id: grant.host_id.clone(),
+        };
+        save_controller_trust(&dir, &controller).unwrap();
+        assert_eq!(
+            load_controller_trust(&dir).unwrap().unwrap().secret,
+            grant.secret
+        );
+        authority.disconnect("desktop_1");
+        let restarted = Authority::load(&dir).unwrap();
+        assert_eq!(restarted.bootstrap().unwrap().trusted.unwrap().id, grant.id);
+        assert!(restarted
+            .begin_auth(
+                "desktop_2".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                None,
+                Some(grant.id.clone())
+            )
+            .is_ok());
+        restarted.revoke_trusted_pc().unwrap();
+        assert!(restarted
+            .begin_auth(
+                "desktop_2".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                None,
+                Some(grant.id)
+            )
+            .is_err());
+        forget_controller_trust(&dir).unwrap();
+        assert!(load_controller_trust(&dir).unwrap().is_none());
+        fs::remove_file(secret_path(&dir)).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 }

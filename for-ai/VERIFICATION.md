@@ -32,6 +32,8 @@ For fast capture, use the installed Windows WebView and Linux browser host: sele
 
 For Low data mode, compare WebRTC outbound video bytes over equal 60-second still-screen and moving-screen sessions in normal and Low data modes on the same route. Verify the toggle both before and during a connection, primary-display pointer mapping after scaling, correct new frames after idle, and recovery when browser display constraints are refused. Record applied capture settings and sender bitrate parameters. Do not infer a data-savings percentage from configured limits alone.
 
+For saved desktop trust, pair an installed Windows controller from a password session, then restart both apps and verify password-free reconnect, screen, mouse, and clipboard. Interrupt the network and restore it; observe bounded retries, fresh authorization, and no stale command replay. Verify host-side Revoke terminates its active trusted session, Forget removes the controller credential, Replace password clears host trust, and a normal password session still works after trust revocation. Verify closing the main window leaves one tray-host process, tray Quit ends availability, a second launch focuses the existing instance, and the Start with Windows toggle's enabled/disabled registration and hidden sign-in launch. These are device gates, not build-only gates.
+
 ## Publication
 
 Review staged files for credentials and generated artifacts before public commit. Push without force; verify remote SHA. Confirm Windows check and Pages workflows for that SHA, fetch the Pages HTML/assets, and run the installer workflow to confirm an NSIS executable artifact. Installer build does not prove installation. Report exact results, limitations, and control-plane changes.

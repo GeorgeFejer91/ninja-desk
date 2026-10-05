@@ -23,6 +23,7 @@ struct AuthArgs {
     client_nonce: Option<String>,
     proof: Option<String>,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -97,6 +98,18 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
                 .ok_or("invalid_invite")?;
             Ok(json!(authority.access_link_active(id)))
         }
+        "approve_trusted_pc" => {
+            let peer = args
+                .get("peer")
+                .and_then(Value::as_str)
+                .ok_or("invalid_peer")?;
+            serde_json::to_value(authority.approve_trusted_pc(peer)?)
+                .map_err(|_| "state_error".into())
+        }
+        "revoke_trusted_pc" => {
+            authority.revoke_trusted_pc()?;
+            Ok(Value::Null)
+        }
         "begin_auth" => {
             let args: AuthArgs = serde_json::from_value(args).map_err(|_| "invalid_auth")?;
             serde_json::to_value(authority.begin_auth(
@@ -104,6 +117,7 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
                 args.host_cert.ok_or("invalid_auth")?,
                 args.client_cert.ok_or("invalid_auth")?,
                 args.invite_id,
+                args.trusted_id,
             )?)
             .map_err(|_| "state_error".into())
         }
@@ -114,6 +128,7 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
                 args.client_nonce.ok_or("invalid_auth")?,
                 args.proof.ok_or("invalid_auth")?,
                 args.invite_id,
+                args.trusted_id,
             )?)
             .map_err(|_| "state_error".into())
         }

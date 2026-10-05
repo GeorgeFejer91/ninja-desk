@@ -6,6 +6,7 @@
 .companion-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid #e7e5e4; padding-bottom: 12px; }
 #status { min-width: 0; color: #57534e; text-align: right; }
 .connect-form { display: grid; gap: 8px; max-width: 640px; }
+.connect-form #forget-trusted { justify-self: start; }
 .connect-row, .clipboard-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .connect-row input { min-width: 0; flex: 1; padding: 9px 10px; border: 1px solid #d6d3d1; border-radius: 6px; }
 

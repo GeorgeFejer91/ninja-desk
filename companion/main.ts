@@ -1,4 +1,5 @@
 import VDONinja from "@vdoninja/sdk";
+import { invoke as nativeInvoke, isTauri } from "@tauri-apps/api/core";
 import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
 import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from "../src/protocol";
@@ -18,6 +19,7 @@ catch { invalidAccessLink = true; }
 const form = document.querySelector<HTMLFormElement>("#connect-form")!;
 const passwordInput = document.querySelector<HTMLInputElement>("#password")!;
 const connectButton = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+const forgetTrustedButton = document.querySelector<HTMLButtonElement>("#forget-trusted");
 const status = document.querySelector<HTMLElement>("#status")!;
 const session = document.querySelector<HTMLElement>("#session")!;
 const screenWrap = document.querySelector<HTMLElement>("#screen-wrap")!;
@@ -67,6 +69,12 @@ let panY = 0;
 let connectionTimer: number | null = null;
 let routeTimer: number | null = null;
 let usingAccessLink = false;
+type TrustedController = { id: string; secret: string; hostId: string };
+let storedTrust: TrustedController | null = null;
+let usingTrusted = false;
+let manualDisconnect = false;
+let retryTimer: number | null = null;
+let retryDelay = 1000;
 let immersiveFallback = false;
 const maxZoom = 32;
 
@@ -81,6 +89,7 @@ function safeError(error: unknown): string {
 }
 
 function resetConnection(message: string) {
+  const retry = usingTrusted && !!storedTrust && !manualDisconnect;
   cancelTouch();
   moveQueue.reset();
   commandQueue = Promise.resolve();
@@ -122,6 +131,14 @@ function resetConnection(message: string) {
   setStatus(message);
   void previous?.disconnect().catch(() => {});
   void previousMedia?.disconnect().catch(() => {});
+  if (retry && retryTimer === null) {
+    retryTimer = window.setTimeout(() => {
+      retryTimer = null;
+      const trust = storedTrust;
+      if (trust && !manualDisconnect) void connect(trust.secret, false, trust.id);
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 30000);
+  }
 }
 
 async function startMedia(password: string) {
@@ -140,6 +157,7 @@ async function startMedia(password: string) {
       session.hidden = false;
       document.body.classList.add("in-session");
       setStatus("Connected");
+      retryDelay = 1000;
       const mediaPeer = received.detail.uuid;
       const updateRoute = async () => {
         if (mediaSdk !== candidate) return;
@@ -253,6 +271,10 @@ async function handleData(uuid: string, data: unknown) {
     if (data.type === "auth_ok" && typeof data.proof === "string" && typeof data.mediaPassword === "string" && passwordBytes) {
       const expected = await hmacHex(passwordBytes, `host|${authTranscript}`);
       if (data.proof !== expected) throw new Error("Host proof failed");
+      if (usingTrusted && storedTrust && data.hostId !== storedTrust.hostId) {
+        manualDisconnect = true;
+        throw new Error("Trusted host identity changed");
+      }
       if (!/^[0-9a-f]{64}$/.test(data.mediaPassword)) throw new Error("Invalid media grant");
       sessionKey = await hmacBytes(passwordBytes, `session|${authTranscript}`);
       if (data.mediaPassword !== await hmacHex(sessionKey, "media|v1")) throw new Error("Media grant mismatch");
@@ -273,10 +295,40 @@ async function handleData(uuid: string, data: unknown) {
       return;
     }
     if (data.type === "auth_error") {
+      if (usingTrusted && data.reason === "trust_rejected") {
+        manualDisconnect = true;
+        resetConnection("Trusted access was rejected. Pair this PC again.");
+        return;
+      }
       resetConnection(usingAccessLink ? "Link unavailable. Use the password or create a new link." : "Access denied or host busy");
       return;
     }
+    if (data.type === "trusted_revoked" && usingTrusted) {
+      manualDisconnect = true;
+      resetConnection("Tower revoked this PC. Enter the password to pair again.");
+      return;
+    }
+    if (data.type === "session_expired") {
+      resetConnection("Session expired. Reconnecting…");
+      return;
+    }
     if (!sessionKey) return;
+    if (data.type === "trusted_grant" && isTauri() &&
+        typeof data.id === "string" && /^[0-9a-f]{32}$/.test(data.id) &&
+        typeof data.secret === "string" && /^[0-9a-f]{64}$/.test(data.secret) &&
+        typeof data.hostId === "string" && /^[0-9a-f]{32}$/.test(data.hostId) &&
+        typeof data.mac === "string" && /^[0-9a-f]{64}$/.test(data.mac)) {
+      const expected = await hmacHex(sessionKey, `trusted|${data.hostId}|${data.id}|${data.secret}|${generation}|${clientUuid}`);
+      if (data.mac !== expected) throw new Error("Invalid trust grant");
+      const trust = { id: data.id, secret: data.secret, hostId: data.hostId };
+      await nativeInvoke("save_trusted_controller", { trust });
+      storedTrust = trust;
+      usingTrusted = true;
+      manualDisconnect = false;
+      if (forgetTrustedButton) forgetTrustedButton.hidden = false;
+      setStatus("This PC will reconnect automatically");
+      return;
+    }
     if (data.type === "clipboard" && typeof data.text === "string" && data.text.length <= 256 * 1024) {
       remoteText.value = data.text;
       try { await navigator.clipboard.writeText(data.text); } catch { /* Copy button remains available. */ }
@@ -292,12 +344,15 @@ async function handleData(uuid: string, data: unknown) {
   }
 }
 
-async function connect(password: string, viaLink = false) {
+async function connect(password: string, viaLink = false, trustedId?: string) {
   if (connectButton.disabled) return;
+  if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
   connectButton.disabled = true;
   usingAccessLink = viaLink;
+  usingTrusted = !!trustedId;
+  manualDisconnect = false;
   try {
-    const routePassword = viaLink ? await routePasswordForAccessLink(password) : password;
+    const routePassword = viaLink || trustedId ? await routePasswordForAccessLink(password) : password;
     room = await roomFromPassword(routePassword);
     passwordBytes = hexToBytes(password);
     clientNonce = nonce();
@@ -309,7 +364,10 @@ async function connect(password: string, viaLink = false) {
       if (sdk === attempt && session.hidden) resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
     }, 30000);
     sdk.on("peerConnected", () => console.info("[client] peer connected"));
-    sdk.on("dataChannelOpen", (opened) => console.info(`[client] data channel open: ${opened.detail.type}`));
+    sdk.on("dataChannelOpen", (opened) => {
+      console.info(`[client] data channel open: ${opened.detail.type}`);
+      if (sdk === attempt && opened.detail.uuid === hostUuid && sessionKey) resetConnection("Reauthenticating…");
+    });
     sdk.on("reconnecting", () => console.info("[client] reconnecting"));
     sdk.on("disconnected", () => console.info("[client] signaling disconnected"));
     sdk.on("dataChannelOpen", (opened) => {
@@ -318,7 +376,7 @@ async function connect(password: string, viaLink = false) {
         if (helloSent) return;
         hostUuid = opened.detail.uuid;
         try {
-          send({ type: "auth_hello", clientNonce });
+          send({ type: "auth_hello", clientNonce, trustedId, desktop: isTauri() });
           helloSent = true;
           console.info("[client] hello sent");
         } catch (error) {
@@ -359,11 +417,31 @@ async function connect(password: string, viaLink = false) {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  usingTrusted = false;
   void connect(passwordInput.value.trim().toLowerCase());
 });
 
 if (initialAccessSecret) void connect(initialAccessSecret, true);
 else if (invalidAccessLink) setStatus("Invalid access link. Enter the host password instead.");
+else if (isTauri()) {
+  void nativeInvoke<TrustedController | null>("load_trusted_controller").then((trust) => {
+    storedTrust = trust;
+    if (forgetTrustedButton) forgetTrustedButton.hidden = !trust;
+    if (trust) void connect(trust.secret, false, trust.id);
+  }).catch(() => setStatus("Saved PC unavailable. Enter its password."));
+}
+
+forgetTrustedButton?.addEventListener("click", async () => {
+  manualDisconnect = true;
+  if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+  resetConnection("Saved PC forgotten");
+  try {
+    await nativeInvoke("forget_trusted_controller");
+    storedTrust = null;
+    usingTrusted = false;
+    forgetTrustedButton.hidden = true;
+  } catch { setStatus("Could not forget saved PC"); }
+});
 
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }
 
@@ -588,7 +666,10 @@ screenWrap.addEventListener("wheel", (event) => {
 }, { passive: false });
 
 document.addEventListener("visibilitychange", () => { if (document.hidden) cancelTouch(); });
-document.querySelector("#disconnect")!.addEventListener("click", () => resetConnection("Disconnected"));
+document.querySelector("#disconnect")!.addEventListener("click", () => {
+  manualDisconnect = true;
+  resetConnection("Disconnected");
+});
 modeButton.addEventListener("click", () => {
   cancelTouch();
   inputMode = inputMode === "mouse" ? "touch" : "mouse";

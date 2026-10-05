@@ -4,9 +4,11 @@ mod browser_host;
 mod screen;
 
 use authority::{
-    AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, MouseCommand,
+    AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, ControllerTrust,
+    MouseCommand, TrustedGrant,
 };
 use tauri::{Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 
 #[tauri::command]
 fn transport_mode() -> &'static str {
@@ -87,8 +89,9 @@ fn begin_auth(
     host_cert: String,
     client_cert: String,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 ) -> Result<Challenge, String> {
-    authority.begin_auth(peer, host_cert, client_cert, invite_id)
+    authority.begin_auth(peer, host_cert, client_cert, invite_id, trusted_id)
 }
 
 #[tauri::command]
@@ -98,8 +101,105 @@ fn finish_auth(
     client_nonce: String,
     proof: String,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 ) -> Result<AuthResult, String> {
-    authority.finish_auth(peer, client_nonce, proof, invite_id)
+    authority.finish_auth(peer, client_nonce, proof, invite_id, trusted_id)
+}
+
+#[tauri::command]
+fn approve_trusted_pc(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    peer: String,
+) -> Result<TrustedGrant, String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    authority.approve_trusted_pc(&peer)
+}
+
+#[tauri::command]
+fn revoke_trusted_pc(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    authority.revoke_trusted_pc()
+}
+
+#[tauri::command]
+fn load_trusted_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Option<ControllerTrust>, String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::load_controller_trust(&data_dir)
+}
+
+#[tauri::command]
+fn save_trusted_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    trust: ControllerTrust,
+) -> Result<(), String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::save_controller_trust(&data_dir, &trust)
+}
+
+#[tauri::command]
+fn forget_trusted_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::forget_controller_trust(&data_dir)
+}
+
+#[tauri::command]
+fn get_start_on_login(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<bool, String> {
+    if window.label() != "main" || !cfg!(windows) {
+        return Err("unavailable".into());
+    }
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|_| "autostart_failed".into())
+}
+
+#[tauri::command]
+fn set_start_on_login(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<(), String> {
+    if window.label() != "main" || !cfg!(windows) {
+        return Err("unavailable".into());
+    }
+    if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    }
+    .map_err(|_| "autostart_failed".into())
 }
 
 #[tauri::command]
@@ -184,7 +284,59 @@ fn replace_password(app: tauri::AppHandle, authority: State<'_, Authority>) -> R
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--background"]),
+        ))
         .setup(|app| {
+            use tauri::{
+                menu::{Menu, MenuItem},
+                tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+            };
+            let open = MenuItem::with_id(app, "open", "Open Ninja Desk", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Ninja Desk", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let mut tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            if cfg!(windows) && std::env::args().any(|arg| arg == "--background") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
             let data_dir = app.path().app_data_dir()?;
             let authority = Authority::load(&data_dir).map_err(std::io::Error::other)?;
             app.manage(authority);
@@ -201,6 +353,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             create_access_link,
+            approve_trusted_pc,
+            revoke_trusted_pc,
+            load_trusted_controller,
+            save_trusted_controller,
+            forget_trusted_controller,
+            get_start_on_login,
+            set_start_on_login,
             revoke_access_link,
             access_link_active,
             begin_auth,
@@ -219,6 +378,14 @@ pub fn run() {
             open_browser_host,
             transport_mode
         ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
