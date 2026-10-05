@@ -336,6 +336,9 @@ async function handleData(transport: VDONinja, uuid: string, data: unknown) {
       sessionKey = key;
       sessionSigner = signer;
       runtimePhase = "control_ready";
+      if (usingTrusted && storedTrust && isTauri()) {
+        void nativeInvoke("save_trusted_controller", { trust: storedTrust }).catch(() => {});
+      }
       if (typeof data.width === "number" && typeof data.height === "number" && typeof data.cursorX === "number" && typeof data.cursorY === "number" && Number.isFinite(data.width) && Number.isFinite(data.height) && Number.isFinite(data.cursorX) && Number.isFinite(data.cursorY) && data.width > 1 && data.height > 1) {
         lastPosition = {
           x: clamp(Math.round(data.cursorX * 65535 / (data.width - 1)), 0, 65535),
