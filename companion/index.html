@@ -24,11 +24,12 @@
         <div class="session-bar">
           <div class="session-title"><strong data-fit>Remote desktop</strong><span id="session-status" data-fit role="status">Connected</span><span id="route-status" data-fit></span></div>
           <div class="session-actions">
-            <button id="fullscreen" type="button" aria-label="Full screen" title="Full screen" aria-pressed="false"><span aria-hidden="true">⛶</span><span class="desktop-label" data-fit>Full screen</span></button>
+            <button id="pin-controls" type="button" aria-pressed="false" data-fit>Pin controls</button>
+            <button id="fullscreen" type="button" aria-label="Full screen" title="Full screen (Alt+F)" aria-pressed="false"><span aria-hidden="true">⛶</span><span class="desktop-label" data-fit>Full screen</span></button>
             <button id="disconnect" type="button" aria-label="Disconnect" title="Disconnect"><span aria-hidden="true">×</span><span class="desktop-label" data-fit>Disconnect</span></button>
           </div>
         </div>
-        <div class="screen-wrap" id="screen-wrap" aria-label="Remote desktop touch area">
+        <div class="screen-wrap" id="screen-wrap" tabindex="0" aria-label="Remote desktop. Alt+F toggles full screen.">
           <video id="screen" autoplay playsinline muted aria-label="Remote desktop"></video>
         </div>
         <div class="session-toolbar" aria-label="Remote controls">

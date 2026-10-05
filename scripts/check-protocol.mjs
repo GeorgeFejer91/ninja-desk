@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createHmac, webcrypto } from 'node:crypto';
-import { hexToBytes, hmacHex, mouseMessage, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from '../src/protocol.ts';
+import { hexToBytes, hmacHex, importHmacKey, mouseMessage, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from '../src/protocol.ts';
 import { iceRoute } from '../src/route.ts';
 import { MouseMoveQueue } from '../companion/mouse-queue.ts';
 
@@ -11,6 +11,11 @@ const room = createHash('sha256').update(secret).digest('hex').slice(0, 32);
 assert.equal(await roomFromPassword(password), room);
 const proofText = `client|${transcript(room, 'generation', 'browser_1', '0'.repeat(32), '1'.repeat(32), '2'.repeat(64), '3'.repeat(64))}`;
 assert.equal(await hmacHex(hexToBytes(password), proofText), createHmac('sha256', secret).update(proofText).digest('hex'));
+const signer = await importHmacKey(hexToBytes(password));
+for (const sequence of [1, 2, 65536]) {
+  const move = mouseMessage('generation', 'browser_1', sequence, 1, 100, 200, 0);
+  assert.equal(await hmacHex(signer, move), createHmac('sha256', secret).update(move).digest('hex'), 'reused signing keys must preserve protocol authentication');
+}
 assert.equal(mouseMessage('generation', 'browser_1', 1, 1, 100, 200, 0), 'mouse|generation|browser_1|1|1|100|200|0');
 const stats = [
   { id: 'transport', type: 'transport', connectionType: 'viewer', selectedCandidatePairId: 'pair' },

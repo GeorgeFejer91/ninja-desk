@@ -13,40 +13,70 @@
       <header class="host-header">
         <div class="brand"><img id="brand-mark" alt="" width="36" height="36" /><h1 data-fit>Ninja Desk</h1></div>
         <span id="status" data-fit role="status">Starting…</span>
+        <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings-panel" data-fit>Settings</button>
       </header>
-      <section aria-labelledby="password-heading">
-        <h2 id="password-heading" data-fit>Access password</h2>
+      <div id="desktop-panel" class="desktop-panel">
+      <section class="your-desktop" aria-labelledby="password-heading">
+        <div class="desktop-identity"><h2 id="password-heading" data-fit>Your desktop</h2><label for="host-id" data-fit>Desktop identity</label><input id="host-id" type="text" readonly aria-label="Desktop identity" /></div>
+        <div class="desktop-password"><label for="password" data-fit>Access code</label>
         <div class="password-row">
-          <input id="password" aria-label="Access password" type="password" readonly spellcheck="false" />
+          <input id="password" aria-label="Access code" type="password" readonly spellcheck="false" />
+          <div class="password-buttons">
           <button id="reveal" type="button" data-fit>Show</button>
           <button id="copy" type="button" data-fit>Copy</button>
+          </div>
         </div>
-        <p data-fit>Enter this password on another PC or in the browser companion. Replacing it restarts Ninja Desk automatically.</p>
-      </section>
-      <section aria-labelledby="link-heading">
+        <p data-fit>Use this code for the first connection. Approve the connected PC to let it return without a code.</p>
+        </div>
+        <div class="desktop-pairing">
+        <button id="trust-pc" type="button" data-fit disabled>Remember connected PC</button>
+        <button id="revoke-trust" type="button" data-fit hidden>Revoke trusted PC</button>
+        </div>
+      <section class="access-section" aria-labelledby="link-heading">
         <h2 id="link-heading" data-fit>24-hour access link</h2>
-        <p data-fit>Open one link on your phone or another browser to connect directly. Anyone with the link can control this PC until it expires or you revoke it.</p>
+        <p data-fit>Anyone with this link can control this PC until it expires or you revoke it.</p>
         <button id="create-link" type="button" data-fit>Create access link</button>
-        <div id="link-details" hidden>
+        <div id="link-details" role="dialog" aria-labelledby="access-link-heading" hidden>
+          <div class="link-details-heading"><h2 id="access-link-heading" data-fit>24-hour access link</h2><button id="close-link" type="button" data-fit>Close</button></div>
           <div class="password-row">
             <input id="access-link" aria-label="24-hour access link" type="text" readonly spellcheck="false" />
+            <div class="password-buttons">
             <button id="copy-link" type="button" data-fit>Copy link</button>
             <button id="revoke-link" type="button" data-fit>Revoke link</button>
+            </div>
           </div>
           <p id="link-expiry" data-fit></p>
         </div>
       </section>
+      </section>
+      <section class="remote-desktop" aria-labelledby="remote-heading">
+        <form id="quick-connect" class="quick-connect">
+          <h2 id="remote-heading" data-fit>Control remote desktop</h2>
+          <label for="connect-code" data-fit>Remote access code</label>
+          <div class="connect-code-row"><input id="connect-code" type="password" autocomplete="off" spellcheck="false" minlength="64" maxlength="64" required /><button id="connect-remote" type="submit" data-fit>Connect</button></div>
+          <p id="connect-status" data-fit role="status">Connect once, then approve this PC on the remote computer.</p>
+        </form>
+        <section class="saved-computers" aria-labelledby="saved-heading">
+          <div class="saved-heading"><h2 id="saved-heading" data-fit>Saved computers</h2><button id="refresh-saved" type="button" data-fit>Refresh</button></div>
+          <div id="saved-list" class="saved-list"><p data-fit>No saved computers yet.</p></div>
+          <div class="saved-pagination"><button id="saved-prev" type="button" data-fit disabled>Previous</button><span id="saved-page" data-fit>Page 1</span><button id="saved-next" type="button" data-fit disabled>Next</button></div>
+        </section>
+      </section>
+      </div>
+      <section id="settings-panel" class="settings-panel" hidden aria-labelledby="settings-heading">
+      <h2 id="settings-heading" data-fit>Settings</h2>
       <div class="host-actions">
         <button id="open-host" type="button" data-fit hidden>Open browser host</button>
         <button id="fast-capture" type="button" data-fit>Share primary display (fast)</button>
         <button id="low-data" type="button" aria-pressed="false" data-fit>Low data mode: Off</button>
         <button id="control" type="button" data-fit>Control another PC</button>
-        <button id="trust-pc" type="button" data-fit disabled>Trust connected PC</button>
-        <button id="revoke-trust" type="button" data-fit hidden>Revoke trusted PC</button>
         <button id="start-login" type="button" aria-pressed="false" data-fit>Start with Windows: Off</button>
         <button id="stop" type="button" class="danger" data-fit>Stop remote access</button>
         <button id="replace-password" type="button" data-fit>Replace password</button>
       </div>
+      <p data-fit>Closing this window keeps Ninja Desk in the system tray. Replacing the access code clears trusted access and restarts the app.</p>
+      </section>
+      <footer class="host-footer"><span data-fit>Alt+F · Full screen</span><span data-fit>Primary display · Mouse · Clipboard</span></footer>
       <canvas id="screen" width="1280" height="720" hidden></canvas>
     </main>
   </body>

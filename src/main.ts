@@ -4,6 +4,8 @@ import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "./fingerprints";
 import { isRecord, roomFromPassword, routePasswordForAccessLink } from "./protocol";
 import { watchTextFit } from "./text-fit";
+import { startCliBridge, type CliResult, type RuntimeStatus } from "./cli-bridge";
+import { iceRoute } from "./route";
 
 type TrustedRoute = { id: string; secret: string };
 type Bootstrap = { room: string; streamId: string; password: string; generation: string; hostId: string; trusted: TrustedRoute | null };
@@ -68,6 +70,8 @@ let primaryRetryDelay = 1000;
 let trustedRetryDelay = 1000;
 let incomingQueue: Promise<void> = Promise.resolve();
 let incomingPending = 0;
+let drawnFrames = 0;
+let lastDrawnAt: number | null = null;
 const LOW_DATA_MEDIA = { video: { maxBitrate: 350_000 } };
 
 function safeError(error: unknown): string {
@@ -415,6 +419,7 @@ async function handleData(transport: VDONinja, peer: string, data: unknown, invi
 async function start() {
   void watchTextFit().catch(() => {});
   const config = await invoke<Bootstrap>("bootstrap");
+  document.querySelector<HTMLInputElement>("#host-id")!.value = config.hostId;
   startupStage = "events";
   passwordField.value = config.password;
   currentTrusted = config.trusted;
@@ -442,8 +447,10 @@ async function start() {
       }
       if (activePeer && !stopped) {
         context.drawImage(bitmap, 0, 0);
+        drawnFrames++;
+        lastDrawnAt = performance.now();
         const { cursorX, cursorY, width, height } = event.payload;
-        if (cursorX >= 0 && cursorX < width && cursorY >= 0 && cursorY < height) {
+        if (!desktopPeers.has(activePeer) && cursorX >= 0 && cursorX < width && cursorY >= 0 && cursorY < height) {
           context.beginPath();
           context.moveTo(cursorX, cursorY);
           context.lineTo(cursorX + 2, cursorY + 18);
@@ -530,10 +537,10 @@ createLinkButton.addEventListener("click", async () => {
   }
 });
 
-trustButton.addEventListener("click", async () => {
+async function approveConnectedPc() {
   const peer = activePeer;
   const transport = activeTransport;
-  if (!peer || !transport || !activeDesktop || stopped) return;
+  if (!peer || !transport || !activeDesktop || stopped) throw new Error("No desktop awaiting approval");
   trustButton.disabled = true;
   try {
     const grant = await invoke<TrustedGrant>("approve_trusted_pc", { peer });
@@ -548,12 +555,14 @@ trustButton.addEventListener("click", async () => {
     setStatus("This PC can reconnect until you revoke trust");
   } catch (error) {
     setStatus(`Could not trust PC: ${safeError(error)}`);
+    throw error;
   } finally {
     trustButton.disabled = !activeDesktop || stopped;
   }
-});
+}
+trustButton.addEventListener("click", () => { void approveConnectedPc().catch(() => {}); });
 
-revokeTrustButton.addEventListener("click", async () => {
+async function revokeConnectedPc() {
   revokeTrustButton.disabled = true;
   try {
     if (activePeer && activeTransport === trustedSdk && send(activePeer, { type: "trusted_revoked" }, trustedSdk)) {
@@ -569,10 +578,12 @@ revokeTrustButton.addEventListener("click", async () => {
     setStatus("Trusted PC revoked");
   } catch {
     setStatus("Could not revoke trusted PC");
+    throw new Error("Could not revoke trusted PC");
   } finally {
     revokeTrustButton.disabled = false;
   }
-});
+}
+revokeTrustButton.addEventListener("click", () => { void revokeConnectedPc().catch(() => {}); });
 
 startLoginButton.addEventListener("click", async () => {
   startLoginButton.disabled = true;
@@ -687,6 +698,195 @@ replacePasswordButton.addEventListener("click", async () => {
 controlButton.addEventListener("click", () => {
   void invoke("open_controller").catch(() => setStatus("Could not open controller"));
 });
+
+async function hostRuntime(): Promise<RuntimeStatus> {
+  let route: RuntimeStatus["route"] = "unknown";
+  const current = mediaSdk;
+  if (current) {
+    try {
+      const stats = await current.getStats();
+      if (mediaSdk === current) {
+        const observed = iceRoute(Object.values(stats).flat(), "publisher");
+        route = observed === "Direct" ? "direct" : observed === "Relayed" ? "relayed" : "unknown";
+      }
+    } catch { /* No selected ICE pair is reported as unknown. */ }
+  }
+  const mediaActive = !!mediaSdk && publishedTrack?.readyState === "live";
+  return {
+    phase: stopped ? "stopped" : activePeer ? mediaActive ? "media_ready" : "control_ready" : primaryRetryTimer !== null || trustedRetryTimer !== null ? "reconnecting" : startupStage === "ready" ? "offline" : "connecting",
+    authenticated: !!activePeer,
+    remembered: !!currentTrusted,
+    retryScheduled: primaryRetryTimer !== null || trustedRetryTimer !== null,
+    mediaActive,
+    frames: drawnFrames,
+    lastFrameAgeMs: lastDrawnAt === null ? null : Math.round(performance.now() - lastDrawnAt),
+    route,
+  };
+}
+
+void startCliBridge(hostRuntime, async (action): Promise<CliResult> => {
+  if (action.type === "host_pair_approve") {
+    if (!activePeer || !activeDesktop || stopped) return { ok: false, code: "no_pending_pairing" };
+    await approveConnectedPc();
+    return { ok: true };
+  }
+  if (action.type === "host_pair_revoke") { await revokeConnectedPc(); return { ok: true }; }
+  return { ok: false, code: "wrong_window" };
+}).catch(() => {});
+
+let hostFullscreenBusy = false;
+document.addEventListener("keydown", (event) => {
+  if (event.altKey && event.code === "KeyF" && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    if (!event.repeat && !hostFullscreenBusy) {
+      hostFullscreenBusy = true;
+      void invoke<boolean>("get_window_fullscreen").then(active => invoke<boolean>("set_window_fullscreen", { enabled: !active })).catch(() => {}).finally(() => { hostFullscreenBusy = false; });
+    }
+  }
+});
+
+type SavedComputer = { hostId: string; name: string; lastConnectedAtMs: number };
+const desktopPanel = document.querySelector<HTMLElement>("#desktop-panel")!;
+const settingsPanel = document.querySelector<HTMLElement>("#settings-panel")!;
+const settingsToggle = document.querySelector<HTMLButtonElement>("#settings-toggle")!;
+const savedList = document.querySelector<HTMLElement>("#saved-list")!;
+const connectStatus = document.querySelector<HTMLElement>("#connect-status")!;
+const quickConnect = document.querySelector<HTMLFormElement>("#quick-connect")!;
+const remoteCode = document.querySelector<HTMLInputElement>("#connect-code")!;
+const connectRemote = document.querySelector<HTMLButtonElement>("#connect-remote")!;
+const previousPage = document.querySelector<HTMLButtonElement>("#saved-prev")!;
+const nextPage = document.querySelector<HTMLButtonElement>("#saved-next")!;
+let savedComputers: SavedComputer[] = [];
+let savedPage = 0;
+let savedPageSize = 1;
+let savedPageBudget = 0;
+let loadingSaved = false;
+
+settingsToggle.addEventListener("click", () => {
+  const show = settingsPanel.hidden;
+  settingsPanel.hidden = !show;
+  desktopPanel.hidden = show;
+  settingsToggle.textContent = show ? "Back" : "Settings";
+  settingsToggle.setAttribute("aria-expanded", String(show));
+});
+document.querySelector("#close-link")!.addEventListener("click", () => { linkDetails.hidden = true; createLinkButton.focus(); });
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !linkDetails.hidden) { linkDetails.hidden = true; createLinkButton.focus(); } });
+
+quickConnect.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const password = remoteCode.value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(password)) { connectStatus.textContent = "Enter the remote computer’s full access code."; return; }
+  connectRemote.disabled = true;
+  try {
+    await invoke("connect_controller", { password });
+    remoteCode.value = "";
+    connectStatus.textContent = "Connection started. Approve this PC on the remote computer to save it.";
+  } catch { connectStatus.textContent = "Could not start the connection. Check that Ninja Desk is running."; }
+  finally { connectRemote.disabled = false; }
+});
+
+function fitSavedPage() {
+  if (!savedList.clientHeight) return;
+  const size = Math.max(1, Math.min(4, Math.floor((savedList.clientHeight + 8) / (window.innerWidth < 740 ? 144 : 108))));
+  if (size !== savedPageBudget) { savedPageBudget = size; savedPageSize = size; savedPage = 0; renderSavedComputers(); }
+}
+
+function renderSavedComputers() {
+  savedList.replaceChildren();
+  const pages = Math.max(1, Math.ceil(savedComputers.length / savedPageSize));
+  savedPage = Math.min(savedPage, pages - 1);
+  if (!savedComputers.length) {
+    const empty = document.createElement("p");
+    empty.dataset.fit = "";
+    empty.textContent = "No saved computers yet. Connect using an access code and approve this PC on the remote computer.";
+    savedList.append(empty);
+  }
+  for (const computer of savedComputers.slice(savedPage * savedPageSize, (savedPage + 1) * savedPageSize)) {
+    const row = document.createElement("article");
+    row.className = "saved-computer";
+    const name = document.createElement("span");
+    name.className = "saved-name";
+    name.dataset.fit = "";
+    name.textContent = computer.name || `PC ${computer.hostId.slice(0, 8)}`;
+    const meta = document.createElement("span");
+    meta.className = "saved-meta";
+    meta.dataset.fit = "";
+    meta.textContent = computer.lastConnectedAtMs > 0 ? `Last connected ${new Date(computer.lastConnectedAtMs).toLocaleDateString()}` : "Remembered PC";
+    const actions = document.createElement("div");
+    actions.className = "saved-actions";
+    const reconnect = document.createElement("button");
+    reconnect.type = "button";
+    reconnect.className = "saved-connect";
+    reconnect.dataset.fit = "";
+    reconnect.textContent = "Reconnect";
+    reconnect.addEventListener("click", async () => {
+      reconnect.disabled = true;
+      try { await invoke("connect_controller", { hostId: computer.hostId }); connectStatus.textContent = `Connecting to ${name.textContent}.`; }
+      catch { connectStatus.textContent = "Could not reconnect. The remote PC must be running and online."; }
+      finally { reconnect.disabled = false; }
+    });
+    const rename = document.createElement("button");
+    rename.type = "button";
+    rename.dataset.fit = "";
+    rename.textContent = "Rename";
+    rename.addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.value = computer.name;
+      input.maxLength = 80;
+      input.setAttribute("aria-label", "Computer name. Enter saves, Escape cancels.");
+      name.replaceWith(input);
+      input.focus();
+      input.select();
+      input.addEventListener("keydown", async (event) => {
+        if (event.key === "Escape") renderSavedComputers();
+        if (event.key === "Enter" && input.value.trim()) {
+          input.disabled = true;
+          try { await invoke("rename_saved_computer", { hostId: computer.hostId, name: input.value.trim() }); await refreshSavedComputers(); }
+          catch { connectStatus.textContent = "Could not rename the computer."; input.disabled = false; }
+        }
+      });
+    });
+    const forget = document.createElement("button");
+    forget.type = "button";
+    forget.dataset.fit = "";
+    forget.textContent = "Forget";
+    forget.addEventListener("click", async () => {
+      forget.disabled = true;
+      try { await invoke("forget_saved_computer", { hostId: computer.hostId }); await refreshSavedComputers(); }
+      catch { connectStatus.textContent = "Could not forget the computer."; forget.disabled = false; }
+    });
+    actions.append(reconnect, rename, forget);
+    row.append(name, actions, meta);
+    savedList.append(row);
+  }
+  previousPage.disabled = savedPage === 0;
+  nextPage.disabled = savedPage === pages - 1;
+  document.querySelector<HTMLElement>("#saved-page")!.textContent = `Page ${savedPage + 1} of ${pages}`;
+  requestAnimationFrame(() => {
+    if (savedPageSize > 1 && Array.from(savedList.children).some(row => row.scrollHeight > row.clientHeight + 1)) {
+      savedPageSize--;
+      savedPage = 0;
+      renderSavedComputers();
+    }
+  });
+}
+
+async function refreshSavedComputers() {
+  if (loadingSaved) return;
+  loadingSaved = true;
+  try {
+    const next = await invoke<SavedComputer[]>("list_saved_computers");
+    if (JSON.stringify(next) !== JSON.stringify(savedComputers)) { savedComputers = next; renderSavedComputers(); }
+    fitSavedPage();
+  } catch { connectStatus.textContent = "Saved computers are unavailable in this runtime."; }
+  finally { loadingSaved = false; }
+}
+previousPage.addEventListener("click", () => { savedPage--; renderSavedComputers(); });
+nextPage.addEventListener("click", () => { savedPage++; renderSavedComputers(); });
+document.querySelector("#refresh-saved")!.addEventListener("click", () => { void refreshSavedComputers(); });
+new ResizeObserver(fitSavedPage).observe(savedList);
+void refreshSavedComputers();
+window.setInterval(() => { if (!desktopPanel.hidden && !savedList.contains(document.activeElement)) void refreshSavedComputers(); }, 5000);
 openHostButton.addEventListener("click", () => {
   void invoke("open_browser_host").catch(() => setStatus("Could not open browser host"));
 });

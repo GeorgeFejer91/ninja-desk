@@ -1,7 +1,7 @@
 import { measureLineStats, measureNaturalWidth, prepareWithSegments } from "@chenglou/pretext";
 
 export async function watchTextFit(root: ParentNode = document): Promise<() => void> {
-  const elements = Array.from(root.querySelectorAll<HTMLElement>("[data-fit]"));
+  const elements = new Set(root.querySelectorAll<HTMLElement>("[data-fit]"));
   try {
     await Promise.all([400, 500, 600].map(weight => document.fonts.load(`${weight} 14px "IBM Plex Sans"`)));
   } catch {
@@ -10,7 +10,7 @@ export async function watchTextFit(root: ParentNode = document): Promise<() => v
   }
   const cache = new WeakMap<HTMLElement, { signature: string; prepared: ReturnType<typeof prepareWithSegments> }>();
   const measure = () => {
-    const results = elements.map(element => {
+    const results = Array.from(elements).map(element => {
       if (!element.getClientRects().length) return [element, "hidden"] as const;
       try {
       const style = getComputedStyle(element);
@@ -41,7 +41,15 @@ export async function watchTextFit(root: ParentNode = document): Promise<() => v
   };
   const observer = new ResizeObserver(schedule);
   for (const element of elements) observer.observe(element);
-  const content = new MutationObserver(schedule);
+  const content = new MutationObserver(() => {
+    for (const element of elements) {
+      if (!element.isConnected) { observer.unobserve(element); elements.delete(element); }
+    }
+    for (const element of root.querySelectorAll<HTMLElement>("[data-fit]")) {
+      if (!elements.has(element)) { elements.add(element); observer.observe(element); }
+    }
+    schedule();
+  });
   content.observe(root, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
   measure();
   return () => { observer.disconnect(); content.disconnect(); cancelAnimationFrame(frame); };

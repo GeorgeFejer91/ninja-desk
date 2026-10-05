@@ -22,12 +22,16 @@ export async function sha256Hex(data: Uint8Array | string): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)));
 }
 
-export async function hmacBytes(key: Uint8Array, message: string): Promise<Uint8Array> {
-  const imported = await crypto.subtle.importKey("raw", key as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+export async function importHmacKey(key: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", key as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+}
+
+export async function hmacBytes(key: Uint8Array | CryptoKey, message: string): Promise<Uint8Array> {
+  const imported = key instanceof Uint8Array ? await importHmacKey(key) : key;
   return new Uint8Array(await crypto.subtle.sign("HMAC", imported, encoder.encode(message)));
 }
 
-export async function hmacHex(key: Uint8Array, message: string): Promise<string> {
+export async function hmacHex(key: Uint8Array | CryptoKey, message: string): Promise<string> {
   return bytesToHex(await hmacBytes(key, message));
 }
 
