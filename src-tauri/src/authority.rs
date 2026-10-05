@@ -386,6 +386,13 @@ impl Authority {
 
     pub fn approve_trusted_pc(&self, peer: &str) -> Result<TrustedGrant, String> {
         let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        if inner
+            .grant
+            .as_ref()
+            .is_some_and(|grant| Instant::now() >= grant.expires)
+        {
+            Self::revoke(&mut inner);
+        }
         if !inner.available || inner.data_dir.as_os_str().is_empty() {
             return Err("unavailable".into());
         }
@@ -427,11 +434,8 @@ impl Authority {
             fs::remove_file(path).map_err(|_| "secret_store_failed")?;
         }
         inner.trusted = None;
-        if inner
-            .grant
-            .as_ref()
-            .is_some_and(|grant| grant.trusted_id.is_some())
-        {
+        inner.pending = None;
+        if inner.grant.is_some() {
             Self::revoke(&mut inner);
         }
         Ok(())
@@ -1139,6 +1143,46 @@ mod tests {
             .is_err());
         forget_controller_trust(&dir).unwrap();
         assert!(load_controller_trust(&dir).unwrap().is_none());
+        fs::remove_file(secret_path(&dir)).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn trusted_approval_rejects_expired_grant_and_revoke_closes_password_session() {
+        let dir = std::env::temp_dir().join(format!("ninja-trust-expiry-{}", random_hex()));
+        let authority = Authority::load(&dir).unwrap();
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "desktop_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() - Duration::from_secs(1),
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+        }
+        assert_eq!(
+            authority.approve_trusted_pc("desktop_1").err().unwrap(),
+            "unauthorized"
+        );
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "desktop_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+        }
+        authority.approve_trusted_pc("desktop_1").unwrap();
+        authority.revoke_trusted_pc().unwrap();
+        assert!(authority.active_peer().is_none());
+        assert!(authority.bootstrap().unwrap().trusted.is_none());
         fs::remove_file(secret_path(&dir)).unwrap();
         fs::remove_dir(dir).unwrap();
     }

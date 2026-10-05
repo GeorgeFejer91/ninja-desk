@@ -15,7 +15,10 @@
       {
         "title": "Ninja Desk",
         "width": 640,
-        "height": 620
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 760,
+        "visible": false
       }
     ],
     "security": {

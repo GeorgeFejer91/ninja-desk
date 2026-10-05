@@ -10,13 +10,22 @@ use authority::{
 use tauri::{Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
+fn require_host(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("unavailable".into())
+    }
+}
+
 #[tauri::command]
-fn transport_mode() -> &'static str {
-    if cfg!(target_os = "linux") {
+fn transport_mode(window: tauri::WebviewWindow) -> Result<&'static str, String> {
+    require_host(&window)?;
+    Ok(if cfg!(target_os = "linux") {
         "external"
     } else {
         "webview"
-    }
+    })
 }
 
 #[tauri::command]
@@ -78,12 +87,17 @@ async fn open_controller(
 }
 
 #[tauri::command]
-fn bootstrap(authority: State<'_, Authority>) -> Result<Bootstrap, String> {
+fn bootstrap(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<Bootstrap, String> {
+    require_host(&window)?;
     authority.bootstrap()
 }
 
 #[tauri::command]
 fn begin_auth(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     peer: String,
     host_cert: String,
@@ -91,11 +105,13 @@ fn begin_auth(
     invite_id: Option<String>,
     trusted_id: Option<String>,
 ) -> Result<Challenge, String> {
+    require_host(&window)?;
     authority.begin_auth(peer, host_cert, client_cert, invite_id, trusted_id)
 }
 
 #[tauri::command]
 fn finish_auth(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     peer: String,
     client_nonce: String,
@@ -103,6 +119,7 @@ fn finish_auth(
     invite_id: Option<String>,
     trusted_id: Option<String>,
 ) -> Result<AuthResult, String> {
+    require_host(&window)?;
     authority.finish_auth(peer, client_nonce, proof, invite_id, trusted_id)
 }
 
@@ -194,6 +211,9 @@ fn set_start_on_login(
     if window.label() != "main" || !cfg!(windows) {
         return Err("unavailable".into());
     }
+    let data_dir = app.path().app_data_dir().map_err(|_| "autostart_failed")?;
+    std::fs::write(data_dir.join("startup-choice-v1"), b"chosen")
+        .map_err(|_| "autostart_failed")?;
     if enabled {
         app.autolaunch().enable()
     } else {
@@ -203,75 +223,134 @@ fn set_start_on_login(
 }
 
 #[tauri::command]
-fn create_access_link(authority: State<'_, Authority>) -> Result<AccessLink, String> {
+fn create_access_link(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<AccessLink, String> {
+    require_host(&window)?;
     authority.create_access_link()
 }
 
 #[tauri::command]
-fn revoke_access_link(authority: State<'_, Authority>, id: String) {
+fn revoke_access_link(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    id: String,
+) -> Result<(), String> {
+    require_host(&window)?;
     authority.revoke_access_link(&id);
+    Ok(())
 }
 
 #[tauri::command]
-fn access_link_active(authority: State<'_, Authority>, id: String) -> bool {
-    authority.access_link_active(&id)
+fn access_link_active(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    id: String,
+) -> Result<bool, String> {
+    require_host(&window)?;
+    Ok(authority.access_link_active(&id))
 }
 
 #[tauri::command]
-fn mouse(authority: State<'_, Authority>, command: MouseCommand) -> Result<(), String> {
+fn mouse(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    command: MouseCommand,
+) -> Result<(), String> {
+    require_host(&window)?;
     authority.mouse(command)
 }
 
 #[tauri::command]
 fn write_clipboard(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     command: ClipboardCommand,
 ) -> Result<(), String> {
+    require_host(&window)?;
     authority.write_clipboard(command)
 }
 
 #[tauri::command]
-fn read_clipboard(authority: State<'_, Authority>) -> Result<Option<String>, String> {
+fn read_clipboard(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<Option<String>, String> {
+    require_host(&window)?;
     authority.read_clipboard()
 }
 
 #[tauri::command]
-fn active_peer(authority: State<'_, Authority>) -> Option<String> {
-    authority.active_peer()
+fn active_peer(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<Option<String>, String> {
+    require_host(&window)?;
+    Ok(authority.active_peer())
 }
 
 #[tauri::command]
 fn read_frame(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     frames: State<'_, screen::FrameStore>,
     since: u64,
 ) -> Option<screen::FrameResult> {
+    if require_host(&window).is_err() {
+        return None;
+    }
     authority.active_peer()?;
     frames.latest(since)
 }
 
 #[tauri::command]
-fn set_screen_capture_paused(frames: State<'_, screen::FrameStore>, paused: bool) {
+fn set_screen_capture_paused(
+    window: tauri::WebviewWindow,
+    frames: State<'_, screen::FrameStore>,
+    paused: bool,
+) -> Result<(), String> {
+    require_host(&window)?;
     frames.set_paused(paused);
+    Ok(())
 }
 
 #[tauri::command]
-fn set_low_data_mode(frames: State<'_, screen::FrameStore>, enabled: bool) {
+fn set_low_data_mode(
+    window: tauri::WebviewWindow,
+    frames: State<'_, screen::FrameStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    require_host(&window)?;
     frames.set_low_data(enabled);
+    Ok(())
 }
 
 #[tauri::command]
-fn disconnect(authority: State<'_, Authority>, peer: String) {
+fn disconnect(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    peer: String,
+) -> Result<(), String> {
+    require_host(&window)?;
     authority.disconnect(&peer);
+    Ok(())
 }
 
 #[tauri::command]
-fn stop(authority: State<'_, Authority>) {
+fn stop(window: tauri::WebviewWindow, authority: State<'_, Authority>) -> Result<(), String> {
+    require_host(&window)?;
     authority.stop();
+    Ok(())
 }
 
 #[tauri::command]
-fn replace_password(app: tauri::AppHandle, authority: State<'_, Authority>) -> Result<(), String> {
+fn replace_password(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<(), String> {
+    require_host(&window)?;
     let data_dir = app
         .path()
         .app_data_dir()
@@ -284,15 +363,17 @@ fn replace_password(app: tauri::AppHandle, authority: State<'_, Authority>) -> R
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if args.iter().any(|arg| arg == "--show") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--background"]),
+            None,
         ))
         .setup(|app| {
             use tauri::{
@@ -332,13 +413,26 @@ pub fn run() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
-            if cfg!(windows) && std::env::args().any(|arg| arg == "--background") {
+            if cfg!(debug_assertions)
+                || !cfg!(windows)
+                || std::env::args().any(|arg| arg == "--show")
+            {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
+                    let _ = window.show();
                 }
             }
             let data_dir = app.path().app_data_dir()?;
             let authority = Authority::load(&data_dir).map_err(std::io::Error::other)?;
+            if cfg!(windows)
+                && !cfg!(debug_assertions)
+                && !data_dir.join("startup-choice-v1").exists()
+            {
+                if app.autolaunch().is_enabled().unwrap_or(false)
+                    || app.autolaunch().enable().is_ok()
+                {
+                    let _ = std::fs::write(data_dir.join("startup-choice-v1"), b"default-on");
+                }
+            }
             app.manage(authority);
             app.manage(screen::FrameStore::default());
             #[cfg(target_os = "linux")]
