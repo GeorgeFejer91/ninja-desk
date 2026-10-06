@@ -58,8 +58,12 @@ export function transcript(room: string, generation: string, peer: string, hostN
   return `v1|${room}|${generation}|${peer}|${hostNonce}|${clientNonce}|${hostCert}|${clientCert}`;
 }
 
-export function mouseMessage(generation: string, peer: string, seq: number, op: number, x: number, y: number, arg: number): string {
-  return `mouse|${generation}|${peer}|${seq}|${op}|${x}|${y}|${arg}`;
+export function mouseMessage(generation: string, peer: string, seq: number, op: number, x: number, y: number, arg: number, displayRevision?: number): string {
+  return `mouse|${generation}|${peer}|${seq}|${op}|${x}|${y}|${arg}${displayRevision === undefined ? "" : `|${displayRevision}`}`;
+}
+
+export function monitorMessage(generation: string, peer: string, seq: number, displayRevision: number): string {
+  return `monitor|${generation}|${peer}|${seq}|${displayRevision}`;
 }
 
 export async function clipboardMessage(generation: string, peer: string, seq: number, text: string): Promise<string> {

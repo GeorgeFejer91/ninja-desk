@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::screen::{self, Display};
 use arboard::Clipboard;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
 use hmac::{Hmac, Mac};
@@ -90,6 +91,26 @@ pub struct AuthResult {
     pub cursor_y: i32,
     pub media_password: String,
     pub host_id: String,
+    pub monitor_count: usize,
+    pub display_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorCommand {
+    pub peer: String,
+    pub seq: u64,
+    pub display_revision: u64,
+    pub mac: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorResult {
+    pub display_revision: u64,
+    pub monitor_index: usize,
+    pub monitor_count: usize,
+    pub media_password: String,
 }
 
 #[derive(Serialize)]
@@ -110,6 +131,7 @@ pub struct MouseCommand {
     pub y: u16,
     pub arg: i16,
     pub mac: String,
+    pub display_revision: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -163,6 +185,7 @@ struct Inner {
     clipboard: Option<Clipboard>,
     last_clipboard: Option<String>,
     available: bool,
+    selected_display: Option<(Display, u64)>,
 }
 
 pub struct Authority(Mutex<Inner>);
@@ -545,6 +568,7 @@ impl Authority {
             clipboard: None,
             last_clipboard: None,
             available: true,
+            selected_display: None,
         }))
     }
 
@@ -795,8 +819,13 @@ impl Authority {
             .map_err(|_| "invalid_auth")?;
 
         let mouse = Enigo::new(&Settings::default()).map_err(|_| "mouse_unavailable")?;
-        let display = mouse.main_display().map_err(|_| "display_unavailable")?;
-        let cursor = mouse.location().unwrap_or((display.0 / 2, display.1 / 2));
+        let monitors = screen::displays()?;
+        let selected = monitors[0];
+        let display = (selected.width, selected.height);
+        let cursor = mouse
+            .location()
+            .map(|(x, y)| (x - selected.x, y - selected.y))
+            .unwrap_or((display.0 / 2, display.1 / 2));
         if Instant::now() >= expires {
             return Err("invalid_auth".into());
         }
@@ -804,6 +833,7 @@ impl Authority {
         let host_proof = hex::encode(hmac(&pending.key, &format!("host|{transcript}")));
         let media_password = hex::encode(hmac(&key, "media|v1"));
         inner.mouse = Some(mouse);
+        inner.selected_display = Some((selected, 0));
         inner.grant = Some(Grant {
             peer,
             key,
@@ -822,6 +852,8 @@ impl Authority {
             cursor_y: cursor.1,
             media_password,
             host_id: inner.bootstrap.host_id.clone(),
+            monitor_count: monitors.len(),
+            display_revision: 0,
         })
     }
 
@@ -864,7 +896,7 @@ impl Authority {
         if !matches!(command.op, 1..=8) || (command.op >= 7 && !(-5..=5).contains(&command.arg)) {
             return Err("invalid_mouse".into());
         }
-        let message = format!(
+        let mut message = format!(
             "mouse|{}|{}|{}|{}|{}|{}|{}",
             inner.bootstrap.generation,
             command.peer,
@@ -874,6 +906,9 @@ impl Authority {
             command.y,
             command.arg
         );
+        if let Some(revision) = command.display_revision {
+            message.push_str(&format!("|{revision}"));
+        }
         Self::verify(
             &mut inner,
             &command.peer,
@@ -881,19 +916,14 @@ impl Authority {
             &command.mac,
             &message,
         )?;
-        let expected_display = inner.grant.as_ref().map(|grant| grant.display);
-        let mouse = inner.mouse.as_mut().ok_or("mouse_unavailable")?;
-        let current_display = mouse.main_display().map_err(|_| "display_unavailable")?;
-        if Some(current_display) != expected_display
-            || current_display.0 < 1
-            || current_display.1 < 1
-        {
+        let (selected, revision) = inner.selected_display.ok_or("display_unavailable")?;
+        if command.display_revision.unwrap_or(0) != revision {
             return Err("display_changed".into());
         }
-        let x = i64::from(command.x) * i64::from(current_display.0 - 1) / 65_535;
-        let y = i64::from(command.y) * i64::from(current_display.1 - 1) / 65_535;
+        let (x, y) = selected.point(command.x, command.y);
+        let mouse = inner.mouse.as_mut().ok_or("mouse_unavailable")?;
         mouse
-            .move_mouse(x as i32, y as i32, Coordinate::Abs)
+            .move_mouse(x, y, Coordinate::Abs)
             .map_err(|_| "mouse_failed")?;
         match command.op {
             1 => {}
@@ -927,6 +957,60 @@ impl Authority {
             _ => return Err("invalid_mouse".into()),
         }
         Ok(())
+    }
+
+    pub fn next_monitor(&self, command: MonitorCommand) -> Result<MonitorResult, String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        let message = format!(
+            "monitor|{}|{}|{}|{}",
+            inner.bootstrap.generation, command.peer, command.seq, command.display_revision
+        );
+        Self::verify(
+            &mut inner,
+            &command.peer,
+            command.seq,
+            &command.mac,
+            &message,
+        )?;
+        let (current, revision) = inner.selected_display.ok_or("display_unavailable")?;
+        if command.display_revision != revision {
+            return Err("display_changed".into());
+        }
+        let displays = screen::displays()?;
+        let (next, index) = screen::next_display(&displays, current)?;
+        if inner.left_down {
+            inner
+                .mouse
+                .as_mut()
+                .ok_or("mouse_unavailable")?
+                .button(Button::Left, Direction::Release)
+                .map_err(|_| "mouse_failed")?;
+            inner.left_down = false;
+        }
+        let revision = revision.checked_add(1).ok_or("display_changed")?;
+        let grant = inner.grant.as_mut().ok_or("unauthorized")?;
+        grant.display = (next.width, next.height);
+        let media_password = hex::encode(hmac(
+            &grant.key,
+            &format!("monitor-media|{}|{revision}", command.seq),
+        ));
+        inner.selected_display = Some((next, revision));
+        Ok(MonitorResult {
+            display_revision: revision,
+            monitor_index: index,
+            monitor_count: displays.len(),
+            media_password,
+        })
+    }
+
+    pub fn active_display(&self) -> Option<(String, Display, u64)> {
+        let inner = self.0.lock().ok()?;
+        let grant = inner
+            .grant
+            .as_ref()
+            .filter(|grant| Instant::now() < grant.expires)?;
+        let (display, revision) = inner.selected_display?;
+        Some((grant.peer.clone(), display, revision))
     }
 
     pub fn write_clipboard(&self, command: ClipboardCommand) -> Result<(), String> {
@@ -1054,6 +1138,7 @@ impl Authority {
         }
         inner.left_down = false;
         inner.grant = None;
+        inner.selected_display = None;
         inner.pending = None;
         inner.mouse = None;
         inner.last_clipboard = None;
@@ -1082,6 +1167,78 @@ impl Authority {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_actions_require_authentication_and_current_display_revision() {
+        let authority = Authority::from_secret([7; 32]);
+        let command = || MonitorCommand {
+            peer: "browser_1".into(),
+            seq: 1,
+            display_revision: 0,
+            mac: "0".repeat(64),
+        };
+        assert_eq!(
+            authority.next_monitor(command()).err().unwrap(),
+            "unauthorized"
+        );
+        let key = [9; 32];
+        let generation = authority.bootstrap().unwrap().generation;
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "browser_1".into(),
+                key,
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+            inner.selected_display = Some((
+                Display {
+                    id: 1,
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    primary: true,
+                },
+                1,
+            ));
+        }
+        assert_eq!(
+            authority.next_monitor(command()).err().unwrap(),
+            "invalid_mac"
+        );
+        let mut signed = command();
+        signed.mac = hex::encode(hmac(&key, &format!("monitor|{generation}|browser_1|1|0")));
+        assert_eq!(
+            authority.next_monitor(signed).err().unwrap(),
+            "display_changed"
+        );
+        let mouse = MouseCommand {
+            peer: "browser_1".into(),
+            seq: 2,
+            op: 1,
+            x: 0,
+            y: 0,
+            arg: 0,
+            display_revision: Some(0),
+            mac: hex::encode(hmac(
+                &key,
+                &format!("mouse|{generation}|browser_1|2|1|0|0|0|0"),
+            )),
+        };
+        assert_eq!(authority.mouse(mouse).err().unwrap(), "display_changed");
+        let mut replay = command();
+        replay.mac = hex::encode(hmac(&key, &format!("monitor|{generation}|browser_1|1|0")));
+        assert_eq!(
+            authority.next_monitor(replay).err().unwrap(),
+            "stale_command"
+        );
+        authority.disconnect("browser_1");
+        assert!(authority.active_display().is_none());
+    }
 
     #[test]
     fn rejects_bad_peer_and_proof() {

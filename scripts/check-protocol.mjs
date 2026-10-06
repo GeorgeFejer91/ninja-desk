@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createHmac, webcrypto } from 'node:crypto';
-import { hexToBytes, hmacHex, importHmacKey, mouseMessage, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from '../src/protocol.ts';
+import { hexToBytes, hmacHex, importHmacKey, monitorMessage, mouseMessage, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from '../src/protocol.ts';
 import { iceRoute } from '../src/route.ts';
 import { MouseMoveQueue } from '../companion/mouse-queue.ts';
 
@@ -17,6 +17,9 @@ for (const sequence of [1, 2, 65536]) {
   assert.equal(await hmacHex(signer, move), createHmac('sha256', secret).update(move).digest('hex'), 'reused signing keys must preserve protocol authentication');
 }
 assert.equal(mouseMessage('generation', 'browser_1', 1, 1, 100, 200, 0), 'mouse|generation|browser_1|1|1|100|200|0');
+assert.equal(mouseMessage('generation', 'browser_1', 1, 1, 100, 200, 0, 2), 'mouse|generation|browser_1|1|1|100|200|0|2');
+assert.equal(monitorMessage('generation', 'browser_1', 2, 1), 'monitor|generation|browser_1|2|1');
+assert.notEqual(await hmacHex(signer, monitorMessage('generation', 'browser_1', 2, 1)), await hmacHex(signer, monitorMessage('generation', 'browser_1', 2, 2)), 'monitor revision must be authenticated');
 const stats = [
   { id: 'transport', type: 'transport', connectionType: 'viewer', selectedCandidatePairId: 'pair' },
   { id: 'pair', connectionType: 'viewer', localCandidateId: 'local', remoteCandidateId: 'remote' },

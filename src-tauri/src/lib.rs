@@ -8,7 +8,7 @@ pub use cli::cli_main;
 
 use authority::{
     AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, ControllerTrust,
-    MouseCommand, TrustedGrant,
+    MonitorCommand, MonitorResult, MouseCommand, TrustedGrant,
 };
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -163,6 +163,16 @@ fn get_window_fullscreen(window: tauri::WebviewWindow) -> Result<bool, String> {
         return Err("unavailable".into());
     }
     window.is_fullscreen().map_err(|_| "window_failed".into())
+}
+
+#[tauri::command]
+fn next_monitor(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    command: MonitorCommand,
+) -> Result<MonitorResult, String> {
+    require_host(&window)?;
+    authority.next_monitor(command)
 }
 
 #[tauri::command]
@@ -621,6 +631,7 @@ pub fn run() {
             connect_controller,
             set_window_fullscreen,
             get_window_fullscreen,
+            next_monitor,
             get_start_on_login,
             set_start_on_login,
             revoke_access_link,

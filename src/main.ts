@@ -10,8 +10,9 @@ import { iceRoute } from "./route";
 type TrustedRoute = { id: string; secret: string };
 type Bootstrap = { room: string; streamId: string; password: string; generation: string; hostId: string; trusted: TrustedRoute | null };
 type Challenge = { nonce: string; generation: string; hostCert: string; clientCert: string };
-type AuthResult = { proof: string; width: number; height: number; cursorX: number; cursorY: number; mediaPassword: string };
-type Frame = { jpegBase64: string; width: number; height: number; cursorX: number; cursorY: number };
+type AuthResult = { proof: string; width: number; height: number; cursorX: number; cursorY: number; mediaPassword: string; displayRevision: number };
+type Frame = { jpegBase64: string; width: number; height: number; cursorX: number; cursorY: number; peer: string; displayRevision: number };
+type MonitorResult = { displayRevision: number; monitorIndex: number; monitorCount: number; mediaPassword: string };
 type AccessLink = { id: string; secret: string; expiresAtMs: number };
 type TrustedGrant = TrustedRoute & { hostId: string; mac: string };
 
@@ -57,6 +58,8 @@ let publishedTrack: MediaStreamTrack | null = null;
 let fastCapture: MediaStream | null = null;
 let lowData = false;
 let activePeer: string | null = null;
+let activeDisplayRevision = 0;
+let drawnDisplayRevision = -1;
 let activeDesktop = false;
 let currentTrusted: TrustedRoute | null = null;
 const desktopPeers = new Set<string>();
@@ -375,6 +378,7 @@ async function handleData(transport: VDONinja, peer: string, data: unknown, invi
         return;
       }
       activePeer = peer;
+      activeDisplayRevision = result.displayRevision;
       activeDesktop = desktopPeers.has(peer) && !trustedId;
       trustButton.disabled = !activeDesktop;
       fastCaptureButton.disabled = true;
@@ -390,8 +394,36 @@ async function handleData(transport: VDONinja, peer: string, data: unknown, invi
       return;
     }
     if (peer !== activePeer || transport !== activeTransport) return;
+    if (data.type === "next_monitor") {
+      let result: MonitorResult | null = null;
+      try {
+        const command = { peer, seq: data.seq, displayRevision: data.displayRevision, mac: data.mac };
+        result = await invoke<MonitorResult>("next_monitor", { command });
+        activeDisplayRevision = result.displayRevision;
+        drawnDisplayRevision = -1;
+        closeMedia();
+        stopFastCapture();
+        blankScreen();
+        const deadline = performance.now() + 4000;
+        while (drawnDisplayRevision !== result.displayRevision) {
+          if (activePeer !== peer || activeTransport !== transport || stopped || performance.now() >= deadline) throw new Error("display_unavailable");
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        await startMedia(result.mediaPassword);
+        if (activePeer !== peer || activeTransport !== transport) return;
+        send(peer, { type: "monitor_changed", seq: data.seq, ...result }, transport);
+      } catch (error) {
+        if (result) {
+          send(peer, { type: "session_expired" }, transport);
+          closeActive(transport);
+        } else {
+          send(peer, { type: "monitor_error", seq: data.seq, reason: safeError(error) }, transport);
+        }
+      }
+      return;
+    }
     if (data.type === "mouse") {
-      const command = { peer, seq: data.seq, op: data.op, x: data.x, y: data.y, arg: data.arg, mac: data.mac };
+      const command = { peer, seq: data.seq, op: data.op, x: data.x, y: data.y, arg: data.arg, mac: data.mac, displayRevision: data.displayRevision };
       try {
         await invoke("mouse", { command });
         send(peer, { type: "ack", seq: data.seq, ok: true }, transport);
@@ -440,16 +472,18 @@ async function start() {
   startLoginButton.textContent = `Start with Windows: ${startLogin ? "On" : "Off"}`;
   primaryConfig = config;
   await listen<Frame>("screen-frame", async (event) => {
-    if (!activePeer || stopped) return;
+    if (!activePeer || stopped || event.payload.peer !== activePeer || event.payload.displayRevision !== activeDisplayRevision) return;
     const bytes = Uint8Array.from(atob(event.payload.jpegBase64), (char) => char.charCodeAt(0));
     const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
     try {
+      if (!activePeer || stopped || event.payload.peer !== activePeer || event.payload.displayRevision !== activeDisplayRevision) return;
       if (canvas.width !== event.payload.width || canvas.height !== event.payload.height) {
         canvas.width = event.payload.width;
         canvas.height = event.payload.height;
       }
       if (activePeer && !stopped) {
         context.drawImage(bitmap, 0, 0);
+        drawnDisplayRevision = event.payload.displayRevision;
         drawnFrames++;
         lastDrawnAt = performance.now();
         const { cursorX, cursorY, width, height } = event.payload;

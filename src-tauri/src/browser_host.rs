@@ -139,6 +139,12 @@ fn dispatch(app: &AppHandle, command: &str, args: Value) -> Result<Value, String
             authority.mouse(command)?;
             Ok(Value::Null)
         }
+        "next_monitor" => {
+            let command: crate::authority::MonitorCommand =
+                serde_json::from_value(args.get("command").cloned().ok_or("invalid_monitor")?)
+                    .map_err(|_| "invalid_monitor")?;
+            serde_json::to_value(authority.next_monitor(command)?).map_err(|_| "state_error".into())
+        }
         "write_clipboard" => {
             let command: ClipboardCommand =
                 serde_json::from_value(args.get("command").cloned().ok_or("invalid_clipboard")?)
