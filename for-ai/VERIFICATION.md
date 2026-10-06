@@ -42,6 +42,16 @@ For the readable no-fit fallback, verify page reflow without overlapping control
 
 ## Publication
 
+For cross-computer work, follow `MULTI_COMPUTER.md` and run
+`for-ai/scripts/check-machine.ps1 -Role Controller -ExpectedSourceSha <SHA>`
+on the controlling PC and the same command with `-Role Host` on the host.
+Use `-RequireConnection` for the live-media gate; compare the exact installed
+GUI/CLI hashes from the selected shared installer. Keep credential-free machine
+receipts in ignored `.for-ai-local/`. A partial or blocked host receipt does
+not invalidate an independently verified local source sync, but both results
+must be reported. See `AVAILABILITY.md` for actual sign-in, restart, crash,
+network recovery and authorization qualification.
+
 For startup controller selection, check absent/invalid/oversized preferences, exact saved-target selection with multiple PCs, and forgotten-target rejection. Restart the installed app with the configured target and no arguments; observe a visible controller and fresh runtime reports without a CLI connect action. Verify enabled Windows sign-in registration and preservation of protected pairing. An ordinary process restart exercises application startup, but does not prove a full Windows reboot/sign-in.
 
 Review staged files for credentials and generated artifacts before public commit. Push without force; verify remote SHA. Confirm Windows check and Pages workflows for that SHA, fetch the Pages HTML/assets, and run the installer workflow to confirm an NSIS executable artifact. Installer build does not prove installation. Report exact results, limitations, and control-plane changes.
