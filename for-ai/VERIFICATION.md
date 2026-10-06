@@ -42,5 +42,7 @@ For the readable no-fit fallback, verify page reflow without overlapping control
 
 ## Publication
 
+For startup controller selection, check absent/invalid/oversized preferences, exact saved-target selection with multiple PCs, and forgotten-target rejection. Restart the installed app with the configured target and no arguments; observe a visible controller and fresh runtime reports without a CLI connect action. Verify enabled Windows sign-in registration and preservation of protected pairing. An ordinary process restart exercises application startup, but does not prove a full Windows reboot/sign-in.
+
 Review staged files for credentials and generated artifacts before public commit. Push without force; verify remote SHA. Confirm Windows check and Pages workflows for that SHA, fetch the Pages HTML/assets, and run the installer workflow to confirm an NSIS executable artifact. Installer build does not prove installation. Report exact results, limitations, and control-plane changes.
 Confirm the Linux workflow yields `.deb` and `.AppImage` artifacts when Linux support changes. Installer build does not prove installation or runtime behavior.

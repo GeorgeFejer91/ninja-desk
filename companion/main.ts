@@ -605,7 +605,8 @@ if (initialAccessSecret) void connect(initialAccessSecret, true);
 else if (invalidAccessLink) setStatus("Invalid access link. Enter the host password instead.");
 else if (isTauri()) {
   const startupGeneration = connectionGeneration;
-  void nativeInvoke<TrustedController | null>("load_trusted_controller").then((trust) => {
+  const startupHostId = new URLSearchParams(location.search).get("device") ?? undefined;
+  void nativeInvoke<TrustedController | null>("load_trusted_controller", { hostId: startupHostId }).then((trust) => {
     if (connectionGeneration !== startupGeneration) return;
     storedTrust = trust;
     if (forgetTrustedButton) forgetTrustedButton.hidden = !trust;

@@ -56,6 +56,14 @@ pub(crate) fn ensure_controller_window(
     app: &tauri::AppHandle,
     visible: bool,
 ) -> Result<tauri::WebviewWindow, String> {
+    ensure_controller_window_for(app, visible, None)
+}
+
+fn ensure_controller_window_for(
+    app: &tauri::AppHandle,
+    visible: bool,
+    host_id: Option<&str>,
+) -> Result<tauri::WebviewWindow, String> {
     if let Some(controller) = app.get_webview_window("controller") {
         if visible {
             controller.show().map_err(|_| "window_failed")?;
@@ -64,11 +72,19 @@ pub(crate) fn ensure_controller_window(
         return Ok(controller);
     }
     app.state::<cli::CliRuntime>().clear_report("controller");
-    let controller_url = if visible {
+    let mut controller_url = if visible {
         "controller.html"
     } else {
         "controller.html?background=1"
-    };
+    }
+    .to_string();
+    if let Some(id) = host_id {
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid_arguments".into());
+        }
+        controller_url.push_str(if visible { "?device=" } else { "&device=" });
+        controller_url.push_str(id);
+    }
     let controller = tauri::WebviewWindowBuilder::new(
         app,
         "controller",
@@ -84,6 +100,26 @@ pub(crate) fn ensure_controller_window(
         controller.set_focus().map_err(|_| "window_failed")?;
     }
     Ok(controller)
+}
+
+fn startup_controller_target(data_dir: &std::path::Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let path = data_dir.join("startup-controller-v1");
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("startup_controller_invalid".into()),
+    };
+    let mut id = String::new();
+    file.by_ref()
+        .take(33)
+        .read_to_string(&mut id)
+        .map_err(|_| "startup_controller_invalid")?;
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("startup_controller_invalid".into());
+    }
+    // The preference identifies a saved PC; it never contains its credential.
+    Ok(authority::load_controller_trust_for(data_dir, Some(&id))?.map(|_| id))
 }
 
 #[tauri::command]
@@ -612,6 +648,13 @@ pub fn run() {
                 app.manage(browser_host);
             }
             screen::spawn(app.handle().clone());
+            if cfg!(windows) {
+                if let Ok(Some(host_id)) = startup_controller_target(&data_dir) {
+                    if ensure_controller_window_for(app.handle(), true, Some(&host_id)).is_err() {
+                        eprintln!("Saved PC startup window unavailable");
+                    }
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -667,4 +710,45 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_reconnect_requires_exact_saved_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "ninja-startup-{}",
+            hex::encode(rand::random::<[u8; 16]>())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("startup-controller-v1");
+        assert_eq!(startup_controller_target(&dir).unwrap(), None);
+        for invalid in ["x".repeat(32), "a".repeat(33), "a".repeat(31)] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(startup_controller_target(&dir).is_err());
+        }
+        let first = ControllerTrust {
+            id: "a".repeat(32),
+            secret: "b".repeat(64),
+            host_id: "c".repeat(32),
+        };
+        let other = ControllerTrust {
+            id: "d".repeat(32),
+            secret: "e".repeat(64),
+            host_id: "f".repeat(32),
+        };
+        std::fs::write(&path, &first.host_id).unwrap();
+        assert_eq!(startup_controller_target(&dir).unwrap(), None);
+        authority::save_controller_trust(&dir, &first).unwrap();
+        authority::save_controller_trust(&dir, &other).unwrap();
+        assert_eq!(
+            startup_controller_target(&dir).unwrap(),
+            Some(first.host_id.clone())
+        );
+        authority::forget_controller_trust_for(&dir, &first.host_id).unwrap();
+        assert_eq!(startup_controller_target(&dir).unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
