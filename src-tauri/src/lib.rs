@@ -1,88 +1,560 @@
 mod authority;
+#[cfg(target_os = "linux")]
+mod browser_host;
+mod cli;
 mod screen;
 
+pub use cli::cli_main;
+
 use authority::{
-    AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, MouseCommand,
+    AccessLink, AuthResult, Authority, Bootstrap, Challenge, ClipboardCommand, ControllerTrust,
+    MonitorCommand, MonitorResult, MouseCommand, TrustedGrant,
 };
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
+
+fn require_host(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("unavailable".into())
+    }
+}
 
 #[tauri::command]
-fn bootstrap(authority: State<'_, Authority>) -> Result<Bootstrap, String> {
+fn transport_mode(window: tauri::WebviewWindow) -> Result<&'static str, String> {
+    require_host(&window)?;
+    Ok(if cfg!(target_os = "linux") {
+        "external"
+    } else {
+        "webview"
+    })
+}
+
+#[tauri::command]
+fn open_browser_host(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let host = app.state::<browser_host::BrowserHost>();
+        std::process::Command::new("xdg-open")
+            .arg(&host.url)
+            .spawn()
+            .map_err(|_| "browser_open_failed")?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        Err("unavailable".into())
+    }
+}
+
+pub(crate) fn ensure_controller_window(
+    app: &tauri::AppHandle,
+    visible: bool,
+) -> Result<tauri::WebviewWindow, String> {
+    ensure_controller_window_for(app, visible, None)
+}
+
+fn ensure_controller_window_for(
+    app: &tauri::AppHandle,
+    visible: bool,
+    host_id: Option<&str>,
+) -> Result<tauri::WebviewWindow, String> {
+    if let Some(controller) = app.get_webview_window("controller") {
+        if visible {
+            controller.show().map_err(|_| "window_failed")?;
+            controller.set_focus().map_err(|_| "window_failed")?;
+        }
+        return Ok(controller);
+    }
+    app.state::<cli::CliRuntime>().clear_report("controller");
+    let mut controller_url = if visible {
+        "controller.html"
+    } else {
+        "controller.html?background=1"
+    }
+    .to_string();
+    if let Some(id) = host_id {
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid_arguments".into());
+        }
+        controller_url.push_str(if visible { "?device=" } else { "&device=" });
+        controller_url.push_str(id);
+    }
+    let controller = tauri::WebviewWindowBuilder::new(
+        app,
+        "controller",
+        tauri::WebviewUrl::App(controller_url.into()),
+    )
+    .title("Ninja Desk — Control another PC")
+    .inner_size(1100.0, 760.0)
+    .min_inner_size(640.0, 420.0)
+    .visible(visible)
+    .build()
+    .map_err(|_| "window_failed")?;
+    if visible {
+        controller.set_focus().map_err(|_| "window_failed")?;
+    }
+    Ok(controller)
+}
+
+fn startup_controller_target(data_dir: &std::path::Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let path = data_dir.join("startup-controller-v1");
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("startup_controller_invalid".into()),
+    };
+    let mut id = String::new();
+    file.by_ref()
+        .take(33)
+        .read_to_string(&mut id)
+        .map_err(|_| "startup_controller_invalid")?;
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("startup_controller_invalid".into());
+    }
+    // The preference identifies a saved PC; it never contains its credential.
+    Ok(authority::load_controller_trust_for(data_dir, Some(&id))?.map(|_| id))
+}
+
+#[tauri::command]
+async fn open_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg("https://georgefejer91.github.io/ninja-desk/")
+            .spawn()
+            .map_err(|_| "browser_open_failed")?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    ensure_controller_window(&app, true)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn connect_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    password: Option<String>,
+    host_id: Option<String>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    let action = cli::CliAction::ControllerConnect { password, host_id };
+    if !action.valid() {
+        return Err("invalid_arguments".into());
+    }
+    ensure_controller_window(&app, true)?;
+    std::thread::spawn(move || {
+        let _ = cli::dispatch(&app, action, false);
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn report_runtime_status(
+    window: tauri::WebviewWindow,
+    runtime: State<'_, cli::CliRuntime>,
+    status: cli::RuntimeStatus,
+) -> Result<(), String> {
+    runtime.report(window.label(), status)
+}
+
+#[tauri::command]
+fn complete_cli_action(
+    window: tauri::WebviewWindow,
+    runtime: State<'_, cli::CliRuntime>,
+    request_id: String,
+    result: cli::ActionResult,
+) -> Result<(), String> {
+    runtime.complete(window.label(), &request_id, result)
+}
+
+#[tauri::command]
+fn set_window_fullscreen(window: tauri::WebviewWindow, enabled: bool) -> Result<bool, String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    window
+        .set_fullscreen(enabled)
+        .map_err(|_| "window_failed")?;
+    window.is_fullscreen().map_err(|_| "window_failed".into())
+}
+
+#[tauri::command]
+fn get_window_fullscreen(window: tauri::WebviewWindow) -> Result<bool, String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    window.is_fullscreen().map_err(|_| "window_failed".into())
+}
+
+#[tauri::command]
+fn next_monitor(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    command: MonitorCommand,
+) -> Result<MonitorResult, String> {
+    require_host(&window)?;
+    authority.next_monitor(command)
+}
+
+#[tauri::command]
+fn bootstrap(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<Bootstrap, String> {
+    require_host(&window)?;
     authority.bootstrap()
 }
 
 #[tauri::command]
 fn begin_auth(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     peer: String,
     host_cert: String,
     client_cert: String,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 ) -> Result<Challenge, String> {
-    authority.begin_auth(peer, host_cert, client_cert, invite_id)
+    require_host(&window)?;
+    authority.begin_auth(peer, host_cert, client_cert, invite_id, trusted_id)
 }
 
 #[tauri::command]
 fn finish_auth(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     peer: String,
     client_nonce: String,
     proof: String,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 ) -> Result<AuthResult, String> {
-    authority.finish_auth(peer, client_nonce, proof, invite_id)
+    require_host(&window)?;
+    authority.finish_auth(peer, client_nonce, proof, invite_id, trusted_id)
 }
 
 #[tauri::command]
-fn create_access_link(authority: State<'_, Authority>) -> Result<AccessLink, String> {
+fn approve_trusted_pc(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    peer: String,
+) -> Result<TrustedGrant, String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    authority.approve_trusted_pc(&peer)
+}
+
+#[tauri::command]
+fn revoke_trusted_pc(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("unavailable".into());
+    }
+    authority.revoke_trusted_pc()
+}
+
+#[tauri::command]
+fn load_trusted_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: Option<String>,
+) -> Result<Option<ControllerTrust>, String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::load_controller_trust_for(&data_dir, host_id.as_deref())
+}
+
+#[tauri::command]
+fn save_trusted_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    trust: ControllerTrust,
+) -> Result<(), String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::save_controller_trust(&data_dir, &trust)
+}
+
+#[tauri::command]
+fn forget_trusted_controller(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: Option<String>,
+) -> Result<(), String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    match host_id {
+        Some(id) => authority::forget_controller_trust_for(&data_dir, &id),
+        None => authority::forget_controller_trust(&data_dir),
+    }
+}
+
+#[tauri::command]
+fn list_saved_computers(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<Vec<authority::SavedComputerSummary>, String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::list_saved_computers(&data_dir)
+}
+
+#[tauri::command]
+fn rename_saved_computer(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+    name: String,
+) -> Result<(), String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::rename_saved_computer(&data_dir, &host_id, &name)
+}
+
+#[tauri::command]
+fn forget_saved_computer(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+) -> Result<(), String> {
+    if !matches!(window.label(), "main" | "controller") {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::forget_controller_trust_for(&data_dir, &host_id)?;
+    if app.get_webview_window("controller").is_some() {
+        app.emit_to(
+            "controller",
+            "ninja-saved-computer-forgotten",
+            serde_json::json!({"hostId": host_id}),
+        )
+        .map_err(|_| "window_failed")?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn touch_saved_computer(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    host_id: String,
+    id: String,
+) -> Result<(), String> {
+    if window.label() != "controller" {
+        return Err("unavailable".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "secret_store_failed")?;
+    authority::touch_saved_computer(&data_dir, &host_id, &id)
+}
+
+#[tauri::command]
+fn get_start_on_login(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<bool, String> {
+    if window.label() != "main" || !cfg!(windows) {
+        return Err("unavailable".into());
+    }
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|_| "autostart_failed".into())
+}
+
+#[tauri::command]
+fn set_start_on_login(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    enabled: bool,
+) -> Result<(), String> {
+    if window.label() != "main" || !cfg!(windows) {
+        return Err("unavailable".into());
+    }
+    let data_dir = app.path().app_data_dir().map_err(|_| "autostart_failed")?;
+    std::fs::write(data_dir.join("startup-choice-v1"), b"chosen")
+        .map_err(|_| "autostart_failed")?;
+    if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    }
+    .map_err(|_| "autostart_failed".into())
+}
+
+#[tauri::command]
+fn create_access_link(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<AccessLink, String> {
+    require_host(&window)?;
     authority.create_access_link()
 }
 
 #[tauri::command]
-fn revoke_access_link(authority: State<'_, Authority>, id: String) {
+fn revoke_access_link(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    id: String,
+) -> Result<(), String> {
+    require_host(&window)?;
     authority.revoke_access_link(&id);
+    Ok(())
 }
 
 #[tauri::command]
-fn access_link_active(authority: State<'_, Authority>, id: String) -> bool {
-    authority.access_link_active(&id)
+fn access_link_active(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    id: String,
+) -> Result<bool, String> {
+    require_host(&window)?;
+    Ok(authority.access_link_active(&id))
 }
 
 #[tauri::command]
-fn mouse(authority: State<'_, Authority>, command: MouseCommand) -> Result<(), String> {
+fn mouse(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    command: MouseCommand,
+) -> Result<(), String> {
+    require_host(&window)?;
     authority.mouse(command)
 }
 
 #[tauri::command]
 fn write_clipboard(
+    window: tauri::WebviewWindow,
     authority: State<'_, Authority>,
     command: ClipboardCommand,
 ) -> Result<(), String> {
+    require_host(&window)?;
     authority.write_clipboard(command)
 }
 
 #[tauri::command]
-fn read_clipboard(authority: State<'_, Authority>) -> Result<Option<String>, String> {
+fn read_clipboard(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<Option<String>, String> {
+    require_host(&window)?;
     authority.read_clipboard()
 }
 
 #[tauri::command]
-fn active_peer(authority: State<'_, Authority>) -> Option<String> {
-    authority.active_peer()
+fn active_peer(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<Option<String>, String> {
+    require_host(&window)?;
+    Ok(authority.active_peer())
 }
 
 #[tauri::command]
-fn disconnect(authority: State<'_, Authority>, peer: String) {
+fn read_frame(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    frames: State<'_, screen::FrameStore>,
+    since: u64,
+) -> Option<screen::FrameResult> {
+    if require_host(&window).is_err() {
+        return None;
+    }
+    authority.active_peer()?;
+    frames.latest(since)
+}
+
+#[tauri::command]
+fn set_screen_capture_paused(
+    window: tauri::WebviewWindow,
+    frames: State<'_, screen::FrameStore>,
+    paused: bool,
+) -> Result<(), String> {
+    require_host(&window)?;
+    frames.set_paused(paused);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_low_data_mode(
+    window: tauri::WebviewWindow,
+    frames: State<'_, screen::FrameStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    require_host(&window)?;
+    frames.set_low_data(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+fn disconnect(
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+    peer: String,
+) -> Result<(), String> {
+    require_host(&window)?;
     authority.disconnect(&peer);
+    Ok(())
 }
 
 #[tauri::command]
-fn stop(authority: State<'_, Authority>) {
+fn stop(window: tauri::WebviewWindow, authority: State<'_, Authority>) -> Result<(), String> {
+    require_host(&window)?;
     authority.stop();
+    Ok(())
 }
 
 #[tauri::command]
-fn replace_password(app: tauri::AppHandle, authority: State<'_, Authority>) -> Result<(), String> {
+fn replace_password(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    authority: State<'_, Authority>,
+) -> Result<(), String> {
+    require_host(&window)?;
     let data_dir = app
         .path()
         .app_data_dir()
@@ -95,16 +567,116 @@ fn replace_password(app: tauri::AppHandle, authority: State<'_, Authority>) -> R
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+            if args.iter().any(|arg| arg == "--show") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
+            use tauri::{
+                menu::{Menu, MenuItem},
+                tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+            };
+            let open = MenuItem::with_id(app, "open", "Open Ninja Desk", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Ninja Desk", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let mut tray = TrayIconBuilder::new()
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
+            if cfg!(debug_assertions)
+                || !cfg!(windows)
+                || std::env::args().any(|arg| arg == "--show")
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             let data_dir = app.path().app_data_dir()?;
             let authority = Authority::load(&data_dir).map_err(std::io::Error::other)?;
+            if cfg!(windows)
+                && !cfg!(debug_assertions)
+                && !data_dir.join("startup-choice-v1").exists()
+            {
+                if app.autolaunch().is_enabled().unwrap_or(false)
+                    || app.autolaunch().enable().is_ok()
+                {
+                    let _ = std::fs::write(data_dir.join("startup-choice-v1"), b"default-on");
+                }
+            }
             app.manage(authority);
+            app.manage(screen::FrameStore::default());
+            app.manage(cli::CliRuntime::default());
+            cli::start(app.handle().clone(), &data_dir).map_err(std::io::Error::other)?;
+            #[cfg(target_os = "linux")]
+            {
+                let browser_host =
+                    browser_host::start(app.handle().clone()).map_err(std::io::Error::other)?;
+                app.manage(browser_host);
+            }
             screen::spawn(app.handle().clone());
+            if cfg!(windows) {
+                if let Ok(Some(host_id)) = startup_controller_target(&data_dir) {
+                    if ensure_controller_window_for(app.handle(), true, Some(&host_id)).is_err() {
+                        eprintln!("Saved PC startup window unavailable");
+                    }
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
             create_access_link,
+            approve_trusted_pc,
+            revoke_trusted_pc,
+            load_trusted_controller,
+            save_trusted_controller,
+            forget_trusted_controller,
+            list_saved_computers,
+            rename_saved_computer,
+            forget_saved_computer,
+            touch_saved_computer,
+            report_runtime_status,
+            complete_cli_action,
+            connect_controller,
+            set_window_fullscreen,
+            get_window_fullscreen,
+            next_monitor,
+            get_start_on_login,
+            set_start_on_login,
             revoke_access_link,
             access_link_active,
             begin_auth,
@@ -113,10 +685,70 @@ pub fn run() {
             write_clipboard,
             read_clipboard,
             active_peer,
+            read_frame,
+            set_screen_capture_paused,
+            set_low_data_mode,
             disconnect,
             stop,
-            replace_password
+            replace_password,
+            open_controller,
+            open_browser_host,
+            transport_mode
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                window
+                    .state::<cli::CliRuntime>()
+                    .clear_report(window.label());
+            }
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_reconnect_requires_exact_saved_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "ninja-startup-{}",
+            hex::encode(rand::random::<[u8; 16]>())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("startup-controller-v1");
+        assert_eq!(startup_controller_target(&dir).unwrap(), None);
+        for invalid in ["x".repeat(32), "a".repeat(33), "a".repeat(31)] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(startup_controller_target(&dir).is_err());
+        }
+        let first = ControllerTrust {
+            id: "a".repeat(32),
+            secret: "b".repeat(64),
+            host_id: "c".repeat(32),
+        };
+        let other = ControllerTrust {
+            id: "d".repeat(32),
+            secret: "e".repeat(64),
+            host_id: "f".repeat(32),
+        };
+        std::fs::write(&path, &first.host_id).unwrap();
+        assert_eq!(startup_controller_target(&dir).unwrap(), None);
+        authority::save_controller_trust(&dir, &first).unwrap();
+        authority::save_controller_trust(&dir, &other).unwrap();
+        assert_eq!(
+            startup_controller_target(&dir).unwrap(),
+            Some(first.host_id.clone())
+        );
+        authority::forget_controller_trust_for(&dir, &first.host_id).unwrap();
+        assert_eq!(startup_controller_target(&dir).unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

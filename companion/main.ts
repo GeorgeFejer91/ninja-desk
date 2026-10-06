@@ -1,9 +1,14 @@
 import VDONinja from "@vdoninja/sdk";
+import { invoke as nativeInvoke, isTauri } from "@tauri-apps/api/core";
+import { listen as nativeListen } from "@tauri-apps/api/event";
 import logoUrl from "../branding/ninja-desk.svg";
 import { fingerprints } from "../src/fingerprints";
-import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, isRecord, mouseMessage, nonce, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from "../src/protocol";
+import { clipboardMessage, hexToBytes, hmacBytes, hmacHex, importHmacKey, isRecord, monitorMessage, mouseMessage, nonce, parseAccessFragment, roomFromPassword, routePasswordForAccessLink, transcript } from "../src/protocol";
 import { watchTextFit } from "../src/text-fit";
+import { iceRoute } from "../src/route";
 import { clampPan, followPoint, imageRect, relativePoint, screenPoint, zoomPan, type View } from "./view-geometry";
+import { MouseMoveQueue } from "./mouse-queue";
+import { startCliBridge, type CliResult, type RuntimeStatus } from "../src/cli-bridge";
 import "./style.css";
 
 const accessFragment = location.hash;
@@ -16,6 +21,7 @@ catch { invalidAccessLink = true; }
 const form = document.querySelector<HTMLFormElement>("#connect-form")!;
 const passwordInput = document.querySelector<HTMLInputElement>("#password")!;
 const connectButton = form.querySelector<HTMLButtonElement>("button[type=submit]")!;
+const forgetTrustedButton = document.querySelector<HTMLButtonElement>("#forget-trusted");
 const status = document.querySelector<HTMLElement>("#status")!;
 const session = document.querySelector<HTMLElement>("#session")!;
 const screenWrap = document.querySelector<HTMLElement>("#screen-wrap")!;
@@ -25,6 +31,7 @@ const viewOptions = document.querySelector<HTMLElement>("#view-options")!;
 const displayButton = document.querySelector<HTMLButtonElement>("#display-options")!;
 const fullscreenButton = document.querySelector<HTMLButtonElement>("#fullscreen")!;
 const sessionStatus = document.querySelector<HTMLElement>("#session-status")!;
+const routeStatus = document.querySelector<HTMLElement>("#route-status")!;
 const clipboardPanel = document.querySelector<HTMLElement>("#clipboard")!;
 const clipboardButton = document.querySelector<HTMLButtonElement>("#clipboard-toggle")!;
 const remoteText = document.querySelector<HTMLTextAreaElement>("#remote-text")!;
@@ -32,6 +39,7 @@ const localText = document.querySelector<HTMLTextAreaElement>("#local-text")!;
 const copyRemote = document.querySelector<HTMLButtonElement>("#copy-remote")!;
 const pasteLocal = document.querySelector<HTMLButtonElement>("#paste-local")!;
 const sendLocal = document.querySelector<HTMLButtonElement>("#send-local")!;
+const nextMonitorButton = document.querySelector<HTMLButtonElement>("#next-monitor")!;
 document.querySelector<HTMLImageElement>("#brand-mark")!.src = logoUrl;
 document.querySelector<HTMLLinkElement>("#favicon")!.href = logoUrl;
 
@@ -42,12 +50,12 @@ let clientUuid: string | null = null;
 let room = "";
 let passwordBytes: Uint8Array | null = null;
 let sessionKey: Uint8Array | null = null;
+let sessionSigner: CryptoKey | null = null;
 let generation = "";
 let clientNonce = "";
 let helloSent = false;
 let authTranscript = "";
 let seq = 0;
-let queuedMoves = 0;
 let commandQueue: Promise<void> = Promise.resolve();
 let lastPosition = { x: 32768, y: 32768 };
 let inputMode: "mouse" | "touch" = "mouse";
@@ -63,8 +71,29 @@ let viewScale = 1;
 let panX = 0;
 let panY = 0;
 let connectionTimer: number | null = null;
+let routeTimer: number | null = null;
 let usingAccessLink = false;
+type TrustedController = { id: string; secret: string; hostId: string };
+let storedTrust: TrustedController | null = null;
+let usingTrusted = false;
+let manualDisconnect = false;
+let retryTimer: number | null = null;
+let retryDelay = 1000;
+let connectionGeneration = 0;
+let automationMode = isTauri() && new URLSearchParams(location.search).get("background") === "1";
+let runtimePhase: RuntimeStatus["phase"] = "offline";
+let mediaPeer: string | null = null;
+let decodedFrames = 0;
+let lastDecodedAt: number | null = null;
+const pendingAcks = new Map<number, { resolve: () => void; reject: () => void; timer: number }>();
 let immersiveFallback = false;
+let nativeFullscreen = false;
+let fullscreenBusy = false;
+let displayRevision: number | undefined;
+let monitorCount = 0;
+let switchingMonitor = false;
+let monitorTimer: number | null = null;
+let monitorRequest: { seq: number; resolve: () => void; reject: () => void } | null = null;
 const maxZoom = 32;
 
 function setStatus(message: string) {
@@ -78,12 +107,31 @@ function safeError(error: unknown): string {
 }
 
 function resetConnection(message: string) {
+  connectionGeneration++;
+  const retry = usingTrusted && !!storedTrust && !manualDisconnect;
+  runtimePhase = retry ? "reconnecting" : manualDisconnect ? "stopped" : "error";
+  for (const pending of pendingAcks.values()) { clearTimeout(pending.timer); pending.reject(); }
+  pendingAcks.clear();
+  mediaPeer = null;
+  decodedFrames = 0;
+  lastDecodedAt = null;
   cancelTouch();
-  if (document.fullscreenElement === session) void document.exitFullscreen().catch(() => {});
-  immersiveFallback = false;
-  syncFullscreen();
+  monitorRequest?.reject();
+  monitorRequest = null;
+  if (monitorTimer !== null) clearTimeout(monitorTimer);
+  monitorTimer = null;
+  switchingMonitor = false;
+  displayRevision = undefined;
+  monitorCount = 0;
+  nextMonitorButton.disabled = true;
+  video.style.visibility = "";
+  moveQueue.reset();
+  commandQueue = Promise.resolve();
   if (connectionTimer !== null) clearTimeout(connectionTimer);
   connectionTimer = null;
+  if (routeTimer !== null) clearInterval(routeTimer);
+  routeTimer = null;
+  routeStatus.textContent = "";
   const previous = sdk;
   const previousMedia = mediaSdk;
   sdk = null;
@@ -94,6 +142,7 @@ function resetConnection(message: string) {
   usingAccessLink = false;
   passwordInput.value = "";
   sessionKey = null;
+  sessionSigner = null;
   helloSent = false;
   seq = 0;
   video.srcObject = null;
@@ -112,12 +161,22 @@ function resetConnection(message: string) {
   form.hidden = false;
   connectButton.disabled = false;
   setStatus(message);
+  syncFullscreen();
   void previous?.disconnect().catch(() => {});
   void previousMedia?.disconnect().catch(() => {});
+  if (retry && retryTimer === null) {
+    retryTimer = window.setTimeout(() => {
+      retryTimer = null;
+      const trust = storedTrust;
+      if (trust && !manualDisconnect) void connect(trust.secret, false, trust.id);
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 30000);
+  }
 }
 
-async function startMedia(password: string) {
+async function startMedia(password: string, control: VDONinja) {
   const mediaRoom = await roomFromPassword(password);
+  if (sdk !== control) return;
   const candidate = new VDONinja({ password, salt: "vdo.ninja" });
   mediaSdk = candidate;
   try {
@@ -125,6 +184,19 @@ async function startMedia(password: string) {
       if (mediaSdk !== candidate || received.detail.track.kind !== "video") return;
       console.info("[client] desktop video track received");
       video.srcObject = new MediaStream([received.detail.track]);
+      const stream = video.srcObject;
+      if (switchingMonitor) {
+        const ready = () => {
+          if (mediaSdk !== candidate || video.srcObject !== stream) return;
+          switchingMonitor = false;
+          video.style.visibility = "";
+          nextMonitorButton.disabled = monitorCount < 2;
+          if (monitorTimer !== null) clearTimeout(monitorTimer);
+          monitorTimer = null;
+        };
+        if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(ready);
+        else video.addEventListener("loadeddata", ready, { once: true });
+      }
       if (connectionTimer !== null) clearTimeout(connectionTimer);
       connectionTimer = null;
       connectButton.disabled = false;
@@ -132,10 +204,26 @@ async function startMedia(password: string) {
       session.hidden = false;
       document.body.classList.add("in-session");
       setStatus("Connected");
+      retryDelay = 1000;
+      const mediaPeer = received.detail.uuid;
+      runtimePhase = "media_ready";
+      rememberMediaPeer(mediaPeer);
+      const updateRoute = async () => {
+        if (mediaSdk !== candidate) return;
+        const entries = (await candidate.getStats(mediaPeer))[mediaPeer] ?? [];
+        routeStatus.textContent = iceRoute(entries, "viewer");
+      };
+      if (routeTimer !== null) clearInterval(routeTimer);
+      routeStatus.textContent = "Route unknown";
+      routeTimer = window.setInterval(() => { void updateRoute().catch(() => {}); }, 5000);
+      void updateRoute().catch(() => {});
       void video.play().catch(() => setStatus("Tap the screen to start video"));
     });
     candidate.on("peerDisconnected", () => {
-      if (mediaSdk === candidate) resetConnection("Laptop disconnected");
+      if (mediaSdk === candidate && !switchingMonitor) resetConnection("Remote PC disconnected");
+    });
+    candidate.on("reconnectFailed", () => {
+      if (mediaSdk === candidate && !switchingMonitor) resetConnection("Screen connection interrupted. Reconnecting…");
     });
     await candidate.connect();
     if (mediaSdk !== candidate) return;
@@ -155,33 +243,105 @@ function send(data: object) {
   }
 }
 
-function queueMouse(op: number, x = lastPosition.x, y = lastPosition.y, arg = 0) {
-  if (!sessionKey || !hostUuid || !clientUuid || !sdk) return;
-  if (op === 1 && queuedMoves >= 2) return;
-  if (op === 1) queuedMoves++;
-  commandQueue = commandQueue.then(async () => {
-    if (!sessionKey || !sdk || !hostUuid || !clientUuid) return;
-    const next = ++seq;
-    const mac = await hmacHex(sessionKey, mouseMessage(generation, clientUuid, next, op, x, y, arg));
-    send({ type: "mouse", seq: next, op, x, y, arg, mac });
-  }).catch(() => setStatus("Connection interrupted")).finally(() => {
-    if (op === 1) queuedMoves--;
+function waitForAck(next: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const fail = () => reject(new Error("Remote action was not acknowledged"));
+    const timer = window.setTimeout(() => { pendingAcks.delete(next); fail(); }, 7000);
+    pendingAcks.set(next, { resolve, reject: fail, timer });
   });
 }
 
-function queueClipboard(text: string) {
-  if (!sessionKey || !hostUuid || !clientUuid || !sdk) return;
+function sendMouse(op: number, x: number, y: number, arg: number, acknowledge = false): Promise<number> {
+  if (switchingMonitor) return Promise.reject(new Error("Monitor switch pending"));
+  const key = sessionKey;
+  const signer = sessionSigner;
+  const target = hostUuid;
+  const peer = clientUuid;
+  const currentSdk = sdk;
+  const currentGeneration = generation;
+  const revision = displayRevision;
+  const job = commandQueue.then(async () => {
+    if (!key || !signer || !target || !peer || !currentSdk || sessionKey !== key || sdk !== currentSdk) throw new Error("Connection closed");
+    const next = ++seq;
+    const mac = await hmacHex(signer, mouseMessage(currentGeneration, peer, next, op, x, y, arg, revision));
+    if (sessionKey !== key || sdk !== currentSdk || !currentSdk.sendData({ type: "mouse", seq: next, op, x, y, arg, mac, displayRevision: revision }, { uuid: target, allowFallback: false })) throw new Error("Connection closed");
+    if (acknowledge) await waitForAck(next);
+    return next;
+  });
+  commandQueue = job.then(() => {}, () => { if (sdk === currentSdk) setStatus("Connection interrupted"); });
+  return job;
+}
+
+const moveQueue = new MouseMoveQueue(({ x, y }) => sendMouse(1, x, y, 0));
+
+function queueMouse(op: number, x = lastPosition.x, y = lastPosition.y, arg = 0) {
+  if (switchingMonitor || !sessionKey || !hostUuid || !clientUuid || !sdk) return;
+  if (op === 1) { moveQueue.move(x, y); return; }
+  moveQueue.cancelPending();
+  void sendMouse(op, x, y, arg).catch(() => {});
+}
+
+function sendClipboard(text: string, acknowledge = false): Promise<number> {
+  if (!sessionKey || !hostUuid || !clientUuid || !sdk) return Promise.reject(new Error("Connection closed"));
   if (new TextEncoder().encode(text).length > 256 * 1024) {
     setStatus("Clipboard text is too large");
-    return;
+    return Promise.reject(new Error("Clipboard too large"));
   }
-  commandQueue = commandQueue.then(async () => {
-    if (!sessionKey || !sdk || !hostUuid || !clientUuid) return;
+  const key = sessionKey;
+  const signer = sessionSigner;
+  const target = hostUuid;
+  const peer = clientUuid;
+  const currentSdk = sdk;
+  const currentGeneration = generation;
+  const job = commandQueue.then(async () => {
+    if (!signer || sessionKey !== key || sdk !== currentSdk) throw new Error("Connection closed");
     const next = ++seq;
-    const mac = await hmacHex(sessionKey, await clipboardMessage(generation, clientUuid, next, text));
-    send({ type: "clipboard", seq: next, text, mac });
-  }).catch(() => setStatus("Connection interrupted"));
+    const mac = await hmacHex(signer, await clipboardMessage(currentGeneration, peer, next, text));
+    if (sessionKey !== key || sdk !== currentSdk || !currentSdk.sendData({ type: "clipboard", seq: next, text, mac }, { uuid: target, allowFallback: false })) throw new Error("Connection closed");
+    if (acknowledge) await waitForAck(next);
+    return next;
+  });
+  commandQueue = job.then(() => {}, () => { if (sdk === currentSdk) setStatus("Connection interrupted"); });
+  return job;
 }
+
+function queueClipboard(text: string) { void sendClipboard(text).catch(() => {}); }
+
+async function nextMonitor() {
+  if (switchingMonitor || !sessionSigner || !sessionKey || !clientUuid || !sdk || displayRevision === undefined || monitorCount < 2) return;
+  cancelTouch();
+  moveQueue.cancelPending();
+  switchingMonitor = true;
+  nextMonitorButton.disabled = true;
+  video.style.visibility = "hidden";
+  const key = sessionKey, signer = sessionSigner, peer = clientUuid, control = sdk, revision = displayRevision, currentGeneration = generation;
+  const job = commandQueue.then(async () => {
+    if (sessionKey !== key || sdk !== control) throw new Error("Connection closed");
+    const next = ++seq;
+    const mac = await hmacHex(signer, monitorMessage(currentGeneration, peer, next, revision));
+    if (sessionKey !== key || sdk !== control) throw new Error("Connection closed");
+    await new Promise<void>((resolve, reject) => {
+      monitorRequest = { seq: next, resolve, reject };
+      monitorTimer = window.setTimeout(() => {
+        if (sdk === control) resetConnection("Monitor switch timed out. Reconnecting…");
+      }, 20000);
+      try { send({ type: "next_monitor", seq: next, displayRevision: revision, mac }); }
+      catch (error) { reject(error); resetConnection("Connection interrupted. Reconnecting…"); }
+    });
+  });
+  commandQueue = job.catch(() => {});
+  try { await job; }
+  catch {
+    if (sdk !== control) return;
+    switchingMonitor = false;
+    video.style.visibility = "";
+    nextMonitorButton.disabled = monitorCount < 2;
+    if (monitorTimer !== null) clearTimeout(monitorTimer);
+    monitorTimer = null;
+    setStatus("Could not switch monitor");
+  }
+}
+nextMonitorButton.addEventListener("click", () => { void nextMonitor(); });
 
 function view(): View {
   return { width: screenWrap.clientWidth, height: screenWrap.clientHeight, videoWidth: video.videoWidth, videoHeight: video.videoHeight, scale: viewScale, panX, panY };
@@ -197,18 +357,23 @@ function point(event: PointerEvent | WheelEvent, allowOutside = false): { x: num
   return screenPoint(view(), local.x, local.y, allowOutside);
 }
 
-async function handleData(uuid: string, data: unknown) {
-  if (!isRecord(data) || uuid !== hostUuid) return;
+async function handleData(transport: VDONinja, uuid: string, data: unknown) {
+  if (sdk !== transport || !isRecord(data) || uuid !== hostUuid) return;
   try {
     if (data.type === "auth_challenge" && typeof data.nonce === "string" && typeof data.generation === "string" && typeof data.hostCert === "string" && typeof data.clientCert === "string" && typeof data.peer === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(data.peer) && passwordBytes && sdk) {
       console.info("[client] checking certificate fingerprints");
-      const pair = await fingerprints(sdk, uuid, "viewer");
+      runtimePhase = "authenticating";
+      const password = passwordBytes;
+      const pair = await fingerprints(transport, uuid, "viewer");
+      if (sdk !== transport || passwordBytes !== password) return;
       console.info("[client] certificate fingerprints ready");
       if (pair.remote !== data.hostCert || pair.local !== data.clientCert) throw new Error("WebRTC peer mismatch");
       generation = data.generation;
       clientUuid = data.peer;
       authTranscript = transcript(room, generation, clientUuid, data.nonce, clientNonce, data.hostCert, data.clientCert);
-      send({ type: "auth_proof", clientNonce, proof: await hmacHex(passwordBytes, `client|${authTranscript}`) });
+      const proof = await hmacHex(password, `client|${authTranscript}`);
+      if (sdk !== transport || passwordBytes !== password) return;
+      send({ type: "auth_proof", clientNonce, proof });
       console.info("[client] proof sent");
       return;
     }
@@ -216,11 +381,30 @@ async function handleData(uuid: string, data: unknown) {
       console.warn(`[client] incomplete challenge: fields=${typeof data.nonce}/${typeof data.generation}/${typeof data.hostCert}/${typeof data.clientCert}/${typeof data.peer}`);
     }
     if (data.type === "auth_ok" && typeof data.proof === "string" && typeof data.mediaPassword === "string" && passwordBytes) {
-      const expected = await hmacHex(passwordBytes, `host|${authTranscript}`);
+      const password = passwordBytes;
+      const currentTranscript = authTranscript;
+      const expected = await hmacHex(password, `host|${currentTranscript}`);
+      if (sdk !== transport || passwordBytes !== password) return;
       if (data.proof !== expected) throw new Error("Host proof failed");
+      if (usingTrusted && storedTrust && data.hostId !== storedTrust.hostId) {
+        manualDisconnect = true;
+        throw new Error("Trusted host identity changed");
+      }
       if (!/^[0-9a-f]{64}$/.test(data.mediaPassword)) throw new Error("Invalid media grant");
-      sessionKey = await hmacBytes(passwordBytes, `session|${authTranscript}`);
-      if (data.mediaPassword !== await hmacHex(sessionKey, "media|v1")) throw new Error("Media grant mismatch");
+      const key = await hmacBytes(password, `session|${currentTranscript}`);
+      const mediaPassword = await hmacHex(key, "media|v1");
+      const signer = await importHmacKey(key);
+      if (sdk !== transport || passwordBytes !== password) return;
+      if (data.mediaPassword !== mediaPassword) throw new Error("Media grant mismatch");
+      sessionKey = key;
+      sessionSigner = signer;
+      displayRevision = typeof data.displayRevision === "number" && Number.isSafeInteger(data.displayRevision) && data.displayRevision >= 0 ? data.displayRevision : undefined;
+      monitorCount = typeof data.monitorCount === "number" && Number.isInteger(data.monitorCount) && data.monitorCount >= 1 && data.monitorCount <= 16 ? data.monitorCount : 0;
+      nextMonitorButton.disabled = displayRevision === undefined || monitorCount < 2;
+      runtimePhase = "control_ready";
+      if (usingTrusted && storedTrust && isTauri()) {
+        void nativeInvoke("touch_saved_computer", { hostId: storedTrust.hostId, id: storedTrust.id }).catch(() => {});
+      }
       if (typeof data.width === "number" && typeof data.height === "number" && typeof data.cursorX === "number" && typeof data.cursorY === "number" && Number.isFinite(data.width) && Number.isFinite(data.height) && Number.isFinite(data.cursorX) && Number.isFinite(data.cursorY) && data.width > 1 && data.height > 1) {
         lastPosition = {
           x: clamp(Math.round(data.cursorX * 65535 / (data.width - 1)), 0, 65535),
@@ -230,37 +414,121 @@ async function handleData(uuid: string, data: unknown) {
       passwordInput.value = "";
       setStatus("Connecting screen…");
       try {
-        await startMedia(data.mediaPassword);
+        await startMedia(data.mediaPassword, transport);
       } catch (error) {
+        if (sdk !== transport) return;
         console.warn(`[client] screen connection failed: ${safeError(error)}`);
         resetConnection("Could not start screen");
       }
       return;
     }
     if (data.type === "auth_error") {
+      if (usingTrusted && data.reason === "trust_rejected") {
+        manualDisconnect = true;
+        resetConnection("Trusted access was rejected. Pair this PC again.");
+        runtimePhase = "revoked";
+        return;
+      }
       resetConnection(usingAccessLink ? "Link unavailable. Use the password or create a new link." : "Access denied or host busy");
       return;
     }
-    if (!sessionKey) return;
-    if (data.type === "clipboard" && typeof data.text === "string" && data.text.length <= 256 * 1024) {
-      remoteText.value = data.text;
-      try { await navigator.clipboard.writeText(data.text); } catch { /* Copy button remains available. */ }
+    if (data.type === "trusted_revoked" && usingTrusted) {
+      manualDisconnect = true;
+      resetConnection("The remote PC revoked access. Enter its password to pair again.");
+      runtimePhase = "revoked";
       return;
     }
-    if (data.type === "ack" && data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
+    if (data.type === "session_expired") {
+      resetConnection("Session expired. Reconnecting…");
+      return;
+    }
+    if (!sessionKey) return;
+    if (data.type === "monitor_error" && monitorRequest && monitorRequest.seq === data.seq) {
+      const pending = monitorRequest;
+      monitorRequest = null;
+      pending.reject();
+      return;
+    }
+    if (data.type === "monitor_changed" && monitorRequest && monitorRequest.seq === data.seq) {
+      const pending = monitorRequest;
+      const key = sessionKey;
+      if (typeof data.displayRevision !== "number" || data.displayRevision !== (displayRevision ?? -1) + 1 ||
+          typeof data.monitorCount !== "number" || !Number.isInteger(data.monitorCount) || data.monitorCount < 1 || data.monitorCount > 16 ||
+          typeof data.monitorIndex !== "number" || !Number.isInteger(data.monitorIndex) || data.monitorIndex < 0 || data.monitorIndex >= data.monitorCount ||
+          data.mediaPassword !== await hmacHex(key, `monitor-media|${pending.seq}|${data.displayRevision}`)) throw new Error("Invalid monitor response");
+      if (sdk !== transport || sessionKey !== key || monitorRequest !== pending) return;
+      displayRevision = data.displayRevision;
+      monitorCount = data.monitorCount;
+      lastPosition = { x: 32768, y: 32768 };
+      viewScale = 1; panX = 0; panY = 0; applyView();
+      const previous = mediaSdk;
+      mediaSdk = null;
+      video.srcObject = null;
+      await previous?.disconnect().catch(() => {});
+      if (sdk !== transport || sessionKey !== key) return;
+      await startMedia(data.mediaPassword as string, transport);
+      if (sdk !== transport || sessionKey !== key) return;
+      monitorRequest = null;
+      pending.resolve();
+      return;
+    }
+    if (data.type === "trusted_grant" && isTauri() &&
+        typeof data.id === "string" && /^[0-9a-f]{32}$/.test(data.id) &&
+        typeof data.secret === "string" && /^[0-9a-f]{64}$/.test(data.secret) &&
+        typeof data.hostId === "string" && /^[0-9a-f]{32}$/.test(data.hostId) &&
+        typeof data.mac === "string" && /^[0-9a-f]{64}$/.test(data.mac)) {
+      const key = sessionKey;
+      const expected = await hmacHex(key, `trusted|${data.hostId}|${data.id}|${data.secret}|${generation}|${clientUuid}`);
+      if (sdk !== transport || sessionKey !== key) return;
+      if (data.mac !== expected) throw new Error("Invalid trust grant");
+      const trust = { id: data.id, secret: data.secret, hostId: data.hostId };
+      await nativeInvoke("save_trusted_controller", { trust });
+      storedTrust = trust;
+      if (sdk !== transport || sessionKey !== key) return;
+      usingTrusted = true;
+      manualDisconnect = false;
+      if (forgetTrustedButton) forgetTrustedButton.hidden = false;
+      setStatus("This PC will reconnect automatically");
+      return;
+    }
+    if (data.type === "clipboard" && typeof data.text === "string" && data.text.length <= 256 * 1024) {
+      remoteText.value = data.text;
+      if (!automationMode) {
+        try { await navigator.clipboard.writeText(data.text); } catch { /* Copy button remains available. */ }
+      }
+      return;
+    }
+    if (data.type === "ack" && typeof data.seq === "number") {
+      moveQueue.ack(data.seq);
+      const pending = pendingAcks.get(data.seq);
+      if (pending) {
+        pendingAcks.delete(data.seq);
+        clearTimeout(pending.timer);
+        if (data.ok === true) pending.resolve(); else pending.reject();
+      }
+      if (data.ok === false) setStatus(`Action rejected: ${String(data.reason ?? "unknown")}`);
+    }
   } catch (error) {
+    if (sdk !== transport) return;
     console.warn(`[client] authentication failed: ${safeError(error)}`);
     resetConnection("Authentication failed");
   }
 }
 
-async function connect(password: string, viaLink = false) {
+async function connect(password: string, viaLink = false, trustedId?: string) {
   if (connectButton.disabled) return;
+  const attemptGeneration = ++connectionGeneration;
+  if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
   connectButton.disabled = true;
+  runtimePhase = "connecting";
   usingAccessLink = viaLink;
+  usingTrusted = !!trustedId;
+  manualDisconnect = false;
   try {
-    const routePassword = viaLink ? await routePasswordForAccessLink(password) : password;
-    room = await roomFromPassword(routePassword);
+    const routePassword = viaLink || trustedId ? await routePasswordForAccessLink(password) : password;
+    const nextRoom = await roomFromPassword(routePassword);
+    if (connectionGeneration !== attemptGeneration) return;
+    room = nextRoom;
     passwordBytes = hexToBytes(password);
     clientNonce = nonce();
     clientUuid = null;
@@ -268,19 +536,25 @@ async function connect(password: string, viaLink = false) {
     sdk = new VDONinja({ password: routePassword, salt: "vdo.ninja" });
     const attempt = sdk;
     connectionTimer = window.setTimeout(() => {
-      if (sdk === attempt && session.hidden) resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
+      if (sdk === attempt && runtimePhase !== "media_ready") resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
     }, 30000);
     sdk.on("peerConnected", () => console.info("[client] peer connected"));
-    sdk.on("dataChannelOpen", (opened) => console.info(`[client] data channel open: ${opened.detail.type}`));
+    sdk.on("dataChannelOpen", (opened) => {
+      console.info(`[client] data channel open: ${opened.detail.type}`);
+      if (sdk === attempt && opened.detail.uuid === hostUuid && sessionKey) resetConnection("Reauthenticating…");
+    });
     sdk.on("reconnecting", () => console.info("[client] reconnecting"));
     sdk.on("disconnected", () => console.info("[client] signaling disconnected"));
+    sdk.on("reconnectFailed", () => {
+      if (sdk === attempt) resetConnection("Connection interrupted. Reconnecting…");
+    });
     sdk.on("dataChannelOpen", (opened) => {
       if (sdk !== attempt) return;
       if (opened.detail.uuid === hostUuid || hostUuid === null) {
         if (helloSent) return;
         hostUuid = opened.detail.uuid;
         try {
-          send({ type: "auth_hello", clientNonce });
+          send({ type: "auth_hello", clientNonce, trustedId, desktop: isTauri() });
           helloSent = true;
           console.info("[client] hello sent");
         } catch (error) {
@@ -294,7 +568,7 @@ async function connect(password: string, viaLink = false) {
       if (isRecord(received.detail.data) && typeof received.detail.data.type === "string") {
         console.info(`[client] message: ${received.detail.data.type}`);
       }
-      if (!received.detail.fallback) void handleData(received.detail.uuid, received.detail.data);
+      if (!received.detail.fallback) void handleData(attempt, received.detail.uuid, received.detail.data);
     });
     sdk.on("track", (received) => {
       if (sdk !== attempt) return;
@@ -303,7 +577,7 @@ async function connect(password: string, viaLink = false) {
     sdk.on("peerDisconnected", (lost) => {
       if (sdk !== attempt) return;
       if (lost.detail.uuid === hostUuid) {
-        resetConnection("Laptop disconnected");
+        resetConnection("Remote PC disconnected");
       }
     });
     setStatus(viaLink ? "Connecting with access link…" : "Connecting…");
@@ -314,6 +588,7 @@ async function connect(password: string, viaLink = false) {
     await attempt.view(`host_${room}`, { audio: false, video: true });
     if (sdk === attempt && !sessionKey) setStatus("Checking access…");
   } catch (error) {
+    if (connectionGeneration !== attemptGeneration) return;
     console.warn(`[client] connection failed: ${safeError(error)}`);
     resetConnection(viaLink ? "Link unavailable. Use the password or create a new link." : "Could not connect. Check the password and host app.");
   }
@@ -321,11 +596,40 @@ async function connect(password: string, viaLink = false) {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  usingTrusted = false;
+  automationMode = false;
   void connect(passwordInput.value.trim().toLowerCase());
 });
 
 if (initialAccessSecret) void connect(initialAccessSecret, true);
 else if (invalidAccessLink) setStatus("Invalid access link. Enter the host password instead.");
+else if (isTauri()) {
+  const startupGeneration = connectionGeneration;
+  const startupHostId = new URLSearchParams(location.search).get("device") ?? undefined;
+  void nativeInvoke<TrustedController | null>("load_trusted_controller", { hostId: startupHostId }).then((trust) => {
+    if (connectionGeneration !== startupGeneration) return;
+    storedTrust = trust;
+    if (forgetTrustedButton) forgetTrustedButton.hidden = !trust;
+    if (trust) void connect(trust.secret, false, trust.id);
+  }).catch(() => setStatus("Saved PC unavailable. Enter its password."));
+}
+
+async function forgetTrustedPc(hostId = storedTrust?.hostId) {
+  if (hostId && storedTrust?.hostId !== hostId) {
+    await nativeInvoke("forget_trusted_controller", { hostId });
+    return;
+  }
+  manualDisconnect = true;
+  if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+  resetConnection("Saved PC forgotten");
+  try {
+    await nativeInvoke("forget_trusted_controller", { hostId });
+    storedTrust = null;
+    usingTrusted = false;
+    if (forgetTrustedButton) forgetTrustedButton.hidden = true;
+  } catch { setStatus("Could not forget saved PC"); throw new Error("Could not forget saved PC"); }
+}
+forgetTrustedButton?.addEventListener("click", () => { void forgetTrustedPc().catch(() => {}); });
 
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, value)); }
 
@@ -347,18 +651,37 @@ function zoomAt(scale: number, x = screenWrap.clientWidth / 2, y = screenWrap.cl
 }
 
 function syncFullscreen() {
-  const active = document.fullscreenElement === session || immersiveFallback;
+  const active = document.fullscreenElement === session || immersiveFallback || nativeFullscreen;
   session.classList.toggle("immersive-fallback", immersiveFallback);
-  document.body.classList.toggle("immersive", immersiveFallback);
+  session.classList.toggle("native-fullscreen", nativeFullscreen);
+  document.body.classList.toggle("immersive", immersiveFallback || nativeFullscreen);
   const label = active ? "Exit full screen" : "Full screen";
   fullscreenButton.querySelector<HTMLElement>(".desktop-label")!.textContent = label;
   fullscreenButton.setAttribute("aria-label", label);
-  fullscreenButton.title = label;
+  fullscreenButton.title = `${label} (Alt+F)`;
   fullscreenButton.setAttribute("aria-pressed", String(active));
+  if (active) {
+    viewOptions.hidden = true;
+    clipboardPanel.hidden = true;
+    displayButton.setAttribute("aria-expanded", "false");
+    clipboardButton.setAttribute("aria-expanded", "false");
+    screenWrap.focus({ preventScroll: true });
+  }
+  if (!sessionKey) {
+    session.hidden = !active;
+    document.body.classList.toggle("in-session", active);
+  }
   requestAnimationFrame(applyView);
 }
 
-fullscreenButton.addEventListener("click", async () => {
+async function toggleFullscreen() {
+  if (fullscreenBusy) return;
+  fullscreenBusy = true;
+  try {
+  if (isTauri()) {
+    const active = await nativeInvoke<boolean>("get_window_fullscreen");
+    nativeFullscreen = await nativeInvoke<boolean>("set_window_fullscreen", { enabled: !active });
+  } else
   if (document.fullscreenElement === session) {
     await document.exitFullscreen().catch(() => {});
   } else if (immersiveFallback) {
@@ -372,10 +695,20 @@ fullscreenButton.addEventListener("click", async () => {
     }
   }
   syncFullscreen();
-});
+  } catch { setStatus("Could not change full screen"); }
+  finally { fullscreenBusy = false; }
+}
+fullscreenButton.addEventListener("click", () => { void toggleFullscreen(); });
 document.addEventListener("fullscreenchange", syncFullscreen);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && immersiveFallback) { immersiveFallback = false; syncFullscreen(); }
+  if (event.altKey && event.code === "KeyF" && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    if (!event.repeat && (isTauri() || !session.hidden || nativeFullscreen)) void toggleFullscreen();
+  }
+  if (event.altKey && event.code === "KeyN" && !event.ctrlKey && !event.metaKey) {
+    event.preventDefault();
+    if (!event.repeat) void nextMonitor();
+  }
 });
 video.addEventListener("loadedmetadata", applyView);
 new ResizeObserver(applyView).observe(screenWrap);
@@ -435,6 +768,7 @@ screenWrap.addEventListener("pointerdown", (event) => {
     return;
   }
   event.preventDefault();
+  screenWrap.focus({ preventScroll: true });
   screenWrap.setPointerCapture(event.pointerId);
   if (event.pointerType !== "touch") {
     if (!point(event)) return;
@@ -474,7 +808,11 @@ screenWrap.addEventListener("pointerdown", (event) => {
 
 screenWrap.addEventListener("pointermove", (event) => {
   if (!sessionKey) return;
-  if (event.pointerType !== "touch") { moveAbsolute(event, leftHeld); return; }
+  if (event.pointerType !== "touch") {
+    const samples = event.getCoalescedEvents?.() ?? [];
+    moveAbsolute(samples[samples.length - 1] ?? event, leftHeld);
+    return;
+  }
   const previous = touches.get(event.pointerId);
   if (!previous) return;
   touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -550,7 +888,12 @@ screenWrap.addEventListener("wheel", (event) => {
 }, { passive: false });
 
 document.addEventListener("visibilitychange", () => { if (document.hidden) cancelTouch(); });
-document.querySelector("#disconnect")!.addEventListener("click", () => resetConnection("Disconnected"));
+function disconnectController() {
+  manualDisconnect = true;
+  if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+  resetConnection("Disconnected");
+}
+document.querySelector("#disconnect")!.addEventListener("click", disconnectController);
 modeButton.addEventListener("click", () => {
   cancelTouch();
   inputMode = inputMode === "mouse" ? "touch" : "mouse";
@@ -588,10 +931,85 @@ copyRemote.addEventListener("click", async () => {
   catch { remoteText.select(); setStatus("Select and copy the text above"); }
 });
 pasteLocal.addEventListener("click", async () => {
-  try { localText.value = await navigator.clipboard.readText(); queueClipboard(localText.value); setStatus("Sent to laptop"); }
+  try { localText.value = await navigator.clipboard.readText(); queueClipboard(localText.value); setStatus("Sent to remote PC"); }
   catch { localText.focus(); setStatus("Paste into the text box, then send"); }
 });
-sendLocal.addEventListener("click", () => { queueClipboard(localText.value); setStatus("Sent to laptop"); });
+sendLocal.addEventListener("click", () => { queueClipboard(localText.value); setStatus("Sent to remote PC"); });
 localText.addEventListener("paste", () => { setTimeout(() => queueClipboard(localText.value), 0); });
 
 void watchTextFit();
+
+function rememberMediaPeer(peer: string) { mediaPeer = peer; }
+
+async function controllerRuntime(): Promise<RuntimeStatus> {
+  const current = mediaSdk;
+  const peer = mediaPeer;
+  let frames = video.getVideoPlaybackQuality().totalVideoFrames;
+  if (current && peer) {
+    try {
+      const stats = (await current.getStats(peer))[peer] ?? [];
+      if (mediaSdk === current) {
+        for (const entry of stats) {
+          if (entry.type === "inbound-rtp" && (entry.kind === "video" || entry.mediaType === "video") && typeof entry.framesDecoded === "number") frames = Math.max(frames, entry.framesDecoded);
+        }
+      }
+    } catch { /* Missing stats are reported as unknown, never as ready frames. */ }
+  }
+  if (frames > decodedFrames) { decodedFrames = frames; lastDecodedAt = performance.now(); }
+  const track = (video.srcObject as MediaStream | null)?.getVideoTracks()[0];
+  return {
+    phase: runtimePhase,
+    authenticated: !!sessionKey,
+    remembered: !!storedTrust,
+    retryScheduled: retryTimer !== null,
+    mediaActive: !!mediaSdk && track?.readyState === "live",
+    frames: decodedFrames,
+    lastFrameAgeMs: lastDecodedAt === null ? null : Math.round(performance.now() - lastDecodedAt),
+    route: routeStatus.textContent === "Direct" ? "direct" : routeStatus.textContent === "Relayed" ? "relayed" : "unknown",
+  };
+}
+
+void startCliBridge(controllerRuntime, async (action, automation): Promise<CliResult> => {
+  automationMode = automation;
+  switch (action.type) {
+    case "controller_connect": {
+      if (action.password !== undefined && !/^[0-9a-f]{64}$/.test(action.password)) return { ok: false, code: "invalid_password" };
+      disconnectController();
+      if (action.password !== undefined) {
+        void connect(action.password);
+      } else {
+        const trust = await nativeInvoke<TrustedController | null>("load_trusted_controller", { hostId: action.hostId });
+        storedTrust = trust;
+        if (!trust) return { ok: false, code: "not_paired" };
+        void connect(trust.secret, false, trust.id);
+      }
+      return { ok: true, data: { accepted: true } };
+    }
+    case "controller_disconnect": disconnectController(); return { ok: true };
+    case "controller_forget": await forgetTrustedPc(action.hostId); return { ok: true };
+    case "controller_probe": {
+      if (!sessionKey) return { ok: false, code: "not_connected" };
+      const startedAt = performance.now();
+      await sendMouse(1, lastPosition.x, lastPosition.y, 0, true);
+      return { ok: true, data: { acknowledged: true, roundTripMs: Math.round(performance.now() - startedAt) } };
+    }
+    case "controller_clipboard_send":
+      await sendClipboard(action.text, true);
+      return { ok: true, data: { acknowledged: true } };
+    default: return { ok: false, code: "wrong_window" };
+  }
+}).catch(() => {});
+
+if (isTauri()) {
+  let closed = false;
+  let removeListener: (() => void) | null = null;
+  window.addEventListener("pagehide", () => { closed = true; removeListener?.(); }, { once: true });
+  void nativeListen<{ hostId: string }>("ninja-saved-computer-forgotten", ({ payload }) => {
+    if (!/^[0-9a-f]{32}$/.test(payload.hostId) || storedTrust?.hostId !== payload.hostId) return;
+    disconnectController();
+    storedTrust = null;
+    usingTrusted = false;
+    if (forgetTrustedButton) forgetTrustedButton.hidden = true;
+    setStatus("Saved PC forgotten");
+  }).then(unlisten => { if (closed) unlisten(); else removeListener = unlisten; }).catch(() => {});
+}

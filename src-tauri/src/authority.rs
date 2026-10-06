@@ -1,19 +1,25 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::screen::{self, Display};
 use arboard::Clipboard;
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
 use windows_dpapi::{decrypt_data, encrypt_data, Scope};
 
 type HmacSha256 = Hmac<Sha256>;
 const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 const ACCESS_LINK_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+// One store owner across the main/controller WebViews and CLI status migration.
+static SAVED_COMPUTERS_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +28,48 @@ pub struct Bootstrap {
     pub stream_id: String,
     pub password: String,
     pub generation: String,
+    pub host_id: String,
+    pub trusted: Option<TrustedRoute>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedRoute {
+    pub id: String,
+    pub secret: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedGrant {
+    pub id: String,
+    pub secret: String,
+    pub host_id: String,
+    pub mac: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerTrust {
+    pub id: String,
+    pub secret: String,
+    pub host_id: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedComputer {
+    trust: ControllerTrust,
+    name: String,
+    last_connected_at_ms: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedComputerSummary {
+    pub host_id: String,
+    pub name: String,
+    pub last_connected_at_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -41,6 +89,27 @@ pub struct AuthResult {
     pub height: i32,
     pub cursor_x: i32,
     pub cursor_y: i32,
+    pub media_password: String,
+    pub host_id: String,
+    pub monitor_count: usize,
+    pub display_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorCommand {
+    pub peer: String,
+    pub seq: u64,
+    pub display_revision: u64,
+    pub mac: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorResult {
+    pub display_revision: u64,
+    pub monitor_index: usize,
+    pub monitor_count: usize,
     pub media_password: String,
 }
 
@@ -62,6 +131,7 @@ pub struct MouseCommand {
     pub y: u16,
     pub arg: i16,
     pub mac: String,
+    pub display_revision: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +152,7 @@ struct Pending {
     key: [u8; 32],
     room: String,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
 }
 
 struct Grant {
@@ -90,6 +161,7 @@ struct Grant {
     seq: u64,
     expires: Instant,
     invite_id: Option<String>,
+    trusted_id: Option<String>,
     display: (i32, i32),
 }
 
@@ -103,6 +175,8 @@ struct Invite {
 struct Inner {
     bootstrap: Bootstrap,
     secret: [u8; 32],
+    data_dir: PathBuf,
+    trusted: Option<TrustedRoute>,
     invite: Option<Invite>,
     pending: Option<Pending>,
     grant: Option<Grant>,
@@ -111,6 +185,7 @@ struct Inner {
     clipboard: Option<Clipboard>,
     last_clipboard: Option<String>,
     available: bool,
+    selected_display: Option<(Display, u64)>,
 }
 
 pub struct Authority(Mutex<Inner>);
@@ -138,19 +213,300 @@ fn valid_peer(peer: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+fn secret_path(data_dir: &Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        data_dir.join("access-secret.dpapi")
+    }
+    #[cfg(unix)]
+    {
+        data_dir.join("access-secret.bin")
+    }
+}
+
+fn trust_path(data_dir: &Path, controller: bool) -> PathBuf {
+    let name = if controller {
+        "controller-trust"
+    } else {
+        "trusted-desktop"
+    };
+    data_dir.join(format!(
+        "{name}.{}",
+        if cfg!(windows) { "dpapi" } else { "bin" }
+    ))
+}
+
+fn encode_secret(secret: &[u8]) -> Result<Vec<u8>, String> {
+    #[cfg(windows)]
+    {
+        encrypt_data(secret, Scope::User, None).map_err(|_| "secret_store_failed".into())
+    }
+    #[cfg(unix)]
+    {
+        Ok(secret.to_vec())
+    }
+}
+
+pub(crate) fn read_protected(path: &Path) -> Result<Vec<u8>, String> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::symlink_metadata(path).map_err(|_| "secret_store_failed")?;
+        if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+            return Err("secret_store_invalid".into());
+        }
+    }
+    let encrypted = fs::read(path).map_err(|_| "secret_store_failed")?;
+    if encrypted.is_empty() || encrypted.len() > 64 * 1024 {
+        return Err("secret_store_invalid".into());
+    }
+    #[cfg(windows)]
+    {
+        decrypt_data(&encrypted, Scope::User, None).map_err(|_| "secret_store_invalid".into())
+    }
+    #[cfg(unix)]
+    {
+        Ok(encrypted)
+    }
+}
+
+pub(crate) fn write_protected(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let encoded = encode_secret(bytes)?;
+    let temp = path.with_extension(format!("{}.tmp", random_hex()));
+    let result = (|| -> Result<(), String> {
+        let mut file = secret_file()
+            .open(&temp)
+            .map_err(|_| "secret_store_failed")?;
+        file.write_all(&encoded)
+            .map_err(|_| "secret_store_failed")?;
+        file.sync_all().map_err(|_| "secret_store_failed")?;
+        drop(file);
+        if path.exists() {
+            fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+        }
+        fs::rename(&temp, path).map_err(|_| "secret_store_failed".into())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
+fn valid_trust(trust: &ControllerTrust) -> bool {
+    trust.id.len() == 32
+        && trust.id.bytes().all(|b| b.is_ascii_hexdigit())
+        && trust.secret.len() == 64
+        && trust.secret.bytes().all(|b| b.is_ascii_hexdigit())
+        && trust.host_id.len() == 32
+        && trust.host_id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn saved_computers_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(format!(
+        "controller-trusts.{}",
+        if cfg!(windows) { "dpapi" } else { "bin" }
+    ))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn default_computer_name(host_id: &str) -> String {
+    format!("PC {}", &host_id[..8])
+}
+
+fn read_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputer>, String> {
+    let path = saved_computers_path(data_dir);
+    if path.exists() {
+        let entries: Vec<SavedComputer> =
+            serde_json::from_slice(&read_protected(&path)?).map_err(|_| "secret_store_invalid")?;
+        if entries.len() > 64
+            || entries.iter().any(|entry| {
+                !valid_trust(&entry.trust)
+                    || entry.name.trim().is_empty()
+                    || entry.name.chars().count() > 80
+                    || entry.name.chars().any(char::is_control)
+            })
+            || entries.iter().enumerate().any(|(index, entry)| {
+                entries[..index]
+                    .iter()
+                    .any(|previous| previous.trust.host_id == entry.trust.host_id)
+            })
+        {
+            return Err("secret_store_invalid".into());
+        }
+        return Ok(entries);
+    }
+    let legacy = trust_path(data_dir, true);
+    if !legacy.exists() {
+        return Ok(Vec::new());
+    }
+    let trust: ControllerTrust =
+        serde_json::from_slice(&read_protected(&legacy)?).map_err(|_| "secret_store_invalid")?;
+    if !valid_trust(&trust) {
+        return Err("secret_store_invalid".into());
+    }
+    let entries = vec![SavedComputer {
+        name: default_computer_name(&trust.host_id),
+        trust,
+        last_connected_at_ms: now_ms(),
+    }];
+    let bytes = serde_json::to_vec(&entries).map_err(|_| "secret_store_failed")?;
+    write_protected(&path, &bytes)?;
+    fs::remove_file(legacy).map_err(|_| "secret_store_failed")?;
+    Ok(entries)
+}
+
+fn write_saved_computers(data_dir: &Path, entries: &[SavedComputer]) -> Result<(), String> {
+    let path = saved_computers_path(data_dir);
+    // Keep the empty store so an old migration file cannot restore forgotten trust.
+    let bytes = serde_json::to_vec(entries).map_err(|_| "secret_store_failed")?;
+    write_protected(&path, &bytes)
+}
+
+pub fn list_saved_computers(data_dir: &Path) -> Result<Vec<SavedComputerSummary>, String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    Ok(read_saved_computers(data_dir)?
+        .into_iter()
+        .map(|entry| SavedComputerSummary {
+            host_id: entry.trust.host_id,
+            name: entry.name,
+            last_connected_at_ms: entry.last_connected_at_ms,
+        })
+        .collect())
+}
+
+pub fn load_controller_trust_for(
+    data_dir: &Path,
+    host_id: Option<&str>,
+) -> Result<Option<ControllerTrust>, String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    let entries = read_saved_computers(data_dir)?;
+    Ok(match host_id {
+        Some(id) => entries
+            .into_iter()
+            .find(|entry| entry.trust.host_id == id)
+            .map(|entry| entry.trust),
+        None => entries.into_iter().next().map(|entry| entry.trust),
+    })
+}
+
+#[cfg(test)]
+fn load_controller_trust(data_dir: &Path) -> Result<Option<ControllerTrust>, String> {
+    load_controller_trust_for(data_dir, None)
+}
+
+pub fn save_controller_trust(data_dir: &Path, trust: &ControllerTrust) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    if !valid_trust(trust) {
+        return Err("invalid_trust".into());
+    }
+    let mut entries = read_saved_computers(data_dir)?;
+    if let Some(index) = entries
+        .iter()
+        .position(|entry| entry.trust.host_id == trust.host_id)
+    {
+        let mut entry = entries.remove(index);
+        entry.trust = trust.clone();
+        entry.last_connected_at_ms = now_ms();
+        entries.insert(0, entry);
+    } else {
+        if entries.len() >= 64 {
+            return Err("saved_computers_full".into());
+        }
+        entries.insert(
+            0,
+            SavedComputer {
+                trust: trust.clone(),
+                name: default_computer_name(&trust.host_id),
+                last_connected_at_ms: now_ms(),
+            },
+        );
+    }
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn rename_saved_computer(data_dir: &Path, host_id: &str, name: &str) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err("invalid_name".into());
+    }
+    let mut entries = read_saved_computers(data_dir)?;
+    let entry = entries
+        .iter_mut()
+        .find(|entry| entry.trust.host_id == host_id)
+        .ok_or("unknown_computer")?;
+    entry.name = name.to_owned();
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn touch_saved_computer(data_dir: &Path, host_id: &str, id: &str) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    let mut entries = read_saved_computers(data_dir)?;
+    let index = entries
+        .iter()
+        .position(|entry| entry.trust.host_id == host_id && entry.trust.id == id)
+        .ok_or("unknown_computer")?;
+    let mut entry = entries.remove(index);
+    entry.last_connected_at_ms = now_ms();
+    entries.insert(0, entry);
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn forget_controller_trust_for(data_dir: &Path, host_id: &str) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    let mut entries = read_saved_computers(data_dir)?;
+    entries.retain(|entry| entry.trust.host_id != host_id);
+    write_saved_computers(data_dir, &entries)
+}
+
+pub fn forget_controller_trust(data_dir: &Path) -> Result<(), String> {
+    let _owner = SAVED_COMPUTERS_LOCK
+        .lock()
+        .map_err(|_| "secret_store_failed")?;
+    let mut entries = read_saved_computers(data_dir)?;
+    if !entries.is_empty() {
+        entries.remove(0);
+    }
+    write_saved_computers(data_dir, &entries)
+}
+
+fn secret_file() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
 impl Authority {
     pub fn load(data_dir: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_dir).map_err(|_| "secret_store_failed")?;
-        let path = data_dir.join("access-secret.dpapi");
+        let path = secret_path(data_dir);
         let secret = if path.exists() {
             Self::read_secret(&path)?
         } else {
             let fresh = rand::random::<[u8; 32]>();
-            let encrypted =
-                encrypt_data(&fresh, Scope::User, None).map_err(|_| "secret_store_failed")?;
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
+            let encoded = encode_secret(&fresh)?;
+            match secret_file().open(&path) {
                 Ok(mut file) => {
-                    file.write_all(&encrypted)
+                    file.write_all(&encoded)
                         .map_err(|_| "secret_store_failed")?;
                     file.sync_all().map_err(|_| "secret_store_failed")?;
                     fresh
@@ -161,29 +517,49 @@ impl Authority {
                 Err(_) => return Err("secret_store_failed".into()),
             }
         };
-        Ok(Self::from_secret(secret))
+        let trust_file = trust_path(data_dir, false);
+        let trusted = if trust_file.exists() {
+            let record: TrustedRoute = serde_json::from_slice(&read_protected(&trust_file)?)
+                .map_err(|_| "secret_store_invalid")?;
+            if !valid_trust(&ControllerTrust {
+                id: record.id.clone(),
+                secret: record.secret.clone(),
+                host_id: hex::encode(Sha256::digest(secret))[..32].to_owned(),
+            }) {
+                return Err("secret_store_invalid".into());
+            }
+            Some(record)
+        } else {
+            None
+        };
+        Ok(Self::from_parts(secret, data_dir.to_path_buf(), trusted))
     }
 
     fn read_secret(path: &Path) -> Result<[u8; 32], String> {
-        let encrypted = fs::read(path).map_err(|_| "secret_store_failed")?;
-        if encrypted.is_empty() || encrypted.len() > 4096 {
-            return Err("secret_store_invalid".into());
-        }
-        let raw =
-            decrypt_data(&encrypted, Scope::User, None).map_err(|_| "secret_store_invalid")?;
-        raw.try_into().map_err(|_| "secret_store_invalid".into())
+        read_protected(path)?
+            .try_into()
+            .map_err(|_| "secret_store_invalid".into())
     }
 
+    #[cfg(test)]
     fn from_secret(secret: [u8; 32]) -> Self {
+        Self::from_parts(secret, PathBuf::new(), None)
+    }
+
+    fn from_parts(secret: [u8; 32], data_dir: PathBuf, trusted: Option<TrustedRoute>) -> Self {
         let room = hex::encode(Sha256::digest(secret))[..32].to_owned();
         Self(Mutex::new(Inner {
             bootstrap: Bootstrap {
                 stream_id: format!("host_{room}"),
+                host_id: room.clone(),
                 room,
                 password: hex::encode(secret),
                 generation: random_hex(),
+                trusted: trusted.clone(),
             },
             secret,
+            data_dir,
+            trusted,
             invite: None,
             pending: None,
             grant: None,
@@ -192,6 +568,7 @@ impl Authority {
             clipboard: None,
             last_clipboard: None,
             available: true,
+            selected_display: None,
         }))
     }
 
@@ -202,7 +579,66 @@ impl Authority {
             stream_id: inner.bootstrap.stream_id.clone(),
             password: inner.bootstrap.password.clone(),
             generation: inner.bootstrap.generation.clone(),
+            host_id: inner.bootstrap.host_id.clone(),
+            trusted: inner.trusted.clone(),
         })
+    }
+
+    pub fn approve_trusted_pc(&self, peer: &str) -> Result<TrustedGrant, String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        if inner
+            .grant
+            .as_ref()
+            .is_some_and(|grant| Instant::now() >= grant.expires)
+        {
+            Self::revoke(&mut inner);
+        }
+        if !inner.available || inner.data_dir.as_os_str().is_empty() {
+            return Err("unavailable".into());
+        }
+        let grant = inner
+            .grant
+            .as_ref()
+            .filter(|grant| grant.peer == peer && grant.trusted_id.is_none())
+            .ok_or("unauthorized")?;
+        let key = grant.key;
+        let id = random_hex();
+        let secret = hex::encode(rand::random::<[u8; 32]>());
+        let trusted = TrustedRoute {
+            id: id.clone(),
+            secret: secret.clone(),
+        };
+        let bytes = serde_json::to_vec(&trusted).map_err(|_| "secret_store_failed")?;
+        write_protected(&trust_path(&inner.data_dir, false), &bytes)?;
+        inner.trusted = Some(trusted);
+        let host_id = inner.bootstrap.host_id.clone();
+        let mac = hex::encode(hmac(
+            &key,
+            &format!(
+                "trusted|{host_id}|{id}|{secret}|{}|{peer}",
+                inner.bootstrap.generation
+            ),
+        ));
+        Ok(TrustedGrant {
+            id,
+            secret,
+            host_id,
+            mac,
+        })
+    }
+
+    pub fn revoke_trusted_pc(&self) -> Result<(), String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        let path = trust_path(&inner.data_dir, false);
+        if path.exists() {
+            fs::remove_file(path).map_err(|_| "secret_store_failed")?;
+        }
+        inner.trusted = None;
+        inner.pending = None;
+        if inner.grant.is_some() {
+            Self::revoke(&mut inner);
+        }
+        Ok(())
     }
 
     pub fn create_access_link(&self) -> Result<AccessLink, String> {
@@ -260,6 +696,7 @@ impl Authority {
         host_cert: String,
         client_cert: String,
         invite_id: Option<String>,
+        trusted_id: Option<String>,
     ) -> Result<Challenge, String> {
         let valid_cert =
             |cert: &str| cert.len() == 64 && cert.bytes().all(|b| b.is_ascii_hexdigit());
@@ -270,6 +707,9 @@ impl Authority {
         if !inner.available || inner.grant.is_some() {
             return Err("unavailable".into());
         }
+        if invite_id.is_some() && trusted_id.is_some() {
+            return Err("invalid_auth".into());
+        }
         let (key, room) = match invite_id.as_deref() {
             Some(id) => {
                 let invite = inner
@@ -279,7 +719,21 @@ impl Authority {
                     .ok_or("invalid_link")?;
                 (invite.secret, invite.room.clone())
             }
-            None => (inner.secret, inner.bootstrap.room.clone()),
+            None => match trusted_id.as_deref() {
+                Some(id) => {
+                    let trusted = inner
+                        .trusted
+                        .as_ref()
+                        .filter(|trusted| trusted.id == id)
+                        .ok_or("invalid_trust")?;
+                    let secret: [u8; 32] = hex::decode(&trusted.secret)
+                        .map_err(|_| "invalid_trust")?
+                        .try_into()
+                        .map_err(|_| "invalid_trust")?;
+                    (secret, invite_room(&secret))
+                }
+                None => (inner.secret, inner.bootstrap.room.clone()),
+            },
         };
         let nonce = random_hex();
         inner.pending = Some(Pending {
@@ -291,6 +745,7 @@ impl Authority {
             key,
             room,
             invite_id,
+            trusted_id,
         });
         Ok(Challenge {
             nonce,
@@ -306,6 +761,7 @@ impl Authority {
         client_nonce: String,
         proof: String,
         invite_id: Option<String>,
+        trusted_id: Option<String>,
     ) -> Result<AuthResult, String> {
         if !valid_peer(&peer)
             || client_nonce.len() != 32
@@ -321,6 +777,7 @@ impl Authority {
         let pending = inner.pending.take().ok_or("invalid_auth")?;
         if pending.peer != peer
             || pending.invite_id != invite_id
+            || pending.trusted_id != trusted_id
             || pending.started.elapsed() > Duration::from_secs(30)
         {
             return Err("invalid_auth".into());
@@ -336,6 +793,14 @@ impl Authority {
             }
             None => Instant::now() + ACCESS_LINK_LIFETIME,
         };
+        if pending.trusted_id.as_deref().is_some_and(|id| {
+            inner
+                .trusted
+                .as_ref()
+                .is_none_or(|trusted| trusted.id != id)
+        }) {
+            return Err("invalid_trust".into());
+        }
         let transcript = format!(
             "v1|{}|{}|{}|{}|{}|{}|{}",
             pending.room,
@@ -354,8 +819,13 @@ impl Authority {
             .map_err(|_| "invalid_auth")?;
 
         let mouse = Enigo::new(&Settings::default()).map_err(|_| "mouse_unavailable")?;
-        let display = mouse.main_display().map_err(|_| "display_unavailable")?;
-        let cursor = mouse.location().unwrap_or((display.0 / 2, display.1 / 2));
+        let monitors = screen::displays()?;
+        let selected = monitors[0];
+        let display = (selected.width, selected.height);
+        let cursor = mouse
+            .location()
+            .map(|(x, y)| (x - selected.x, y - selected.y))
+            .unwrap_or((display.0 / 2, display.1 / 2));
         if Instant::now() >= expires {
             return Err("invalid_auth".into());
         }
@@ -363,12 +833,14 @@ impl Authority {
         let host_proof = hex::encode(hmac(&pending.key, &format!("host|{transcript}")));
         let media_password = hex::encode(hmac(&key, "media|v1"));
         inner.mouse = Some(mouse);
+        inner.selected_display = Some((selected, 0));
         inner.grant = Some(Grant {
             peer,
             key,
             seq: 0,
             expires,
             invite_id,
+            trusted_id,
             display,
         });
         inner.last_clipboard = None;
@@ -379,6 +851,9 @@ impl Authority {
             cursor_x: cursor.0,
             cursor_y: cursor.1,
             media_password,
+            host_id: inner.bootstrap.host_id.clone(),
+            monitor_count: monitors.len(),
+            display_revision: 0,
         })
     }
 
@@ -421,7 +896,7 @@ impl Authority {
         if !matches!(command.op, 1..=8) || (command.op >= 7 && !(-5..=5).contains(&command.arg)) {
             return Err("invalid_mouse".into());
         }
-        let message = format!(
+        let mut message = format!(
             "mouse|{}|{}|{}|{}|{}|{}|{}",
             inner.bootstrap.generation,
             command.peer,
@@ -431,6 +906,9 @@ impl Authority {
             command.y,
             command.arg
         );
+        if let Some(revision) = command.display_revision {
+            message.push_str(&format!("|{revision}"));
+        }
         Self::verify(
             &mut inner,
             &command.peer,
@@ -438,19 +916,14 @@ impl Authority {
             &command.mac,
             &message,
         )?;
-        let expected_display = inner.grant.as_ref().map(|grant| grant.display);
-        let mouse = inner.mouse.as_mut().ok_or("mouse_unavailable")?;
-        let current_display = mouse.main_display().map_err(|_| "display_unavailable")?;
-        if Some(current_display) != expected_display
-            || current_display.0 < 1
-            || current_display.1 < 1
-        {
+        let (selected, revision) = inner.selected_display.ok_or("display_unavailable")?;
+        if command.display_revision.unwrap_or(0) != revision {
             return Err("display_changed".into());
         }
-        let x = i64::from(command.x) * i64::from(current_display.0 - 1) / 65_535;
-        let y = i64::from(command.y) * i64::from(current_display.1 - 1) / 65_535;
+        let (x, y) = selected.point(command.x, command.y);
+        let mouse = inner.mouse.as_mut().ok_or("mouse_unavailable")?;
         mouse
-            .move_mouse(x as i32, y as i32, Coordinate::Abs)
+            .move_mouse(x, y, Coordinate::Abs)
             .map_err(|_| "mouse_failed")?;
         match command.op {
             1 => {}
@@ -484,6 +957,60 @@ impl Authority {
             _ => return Err("invalid_mouse".into()),
         }
         Ok(())
+    }
+
+    pub fn next_monitor(&self, command: MonitorCommand) -> Result<MonitorResult, String> {
+        let mut inner = self.0.lock().map_err(|_| "state_error")?;
+        let message = format!(
+            "monitor|{}|{}|{}|{}",
+            inner.bootstrap.generation, command.peer, command.seq, command.display_revision
+        );
+        Self::verify(
+            &mut inner,
+            &command.peer,
+            command.seq,
+            &command.mac,
+            &message,
+        )?;
+        let (current, revision) = inner.selected_display.ok_or("display_unavailable")?;
+        if command.display_revision != revision {
+            return Err("display_changed".into());
+        }
+        let displays = screen::displays()?;
+        let (next, index) = screen::next_display(&displays, current)?;
+        if inner.left_down {
+            inner
+                .mouse
+                .as_mut()
+                .ok_or("mouse_unavailable")?
+                .button(Button::Left, Direction::Release)
+                .map_err(|_| "mouse_failed")?;
+            inner.left_down = false;
+        }
+        let revision = revision.checked_add(1).ok_or("display_changed")?;
+        let grant = inner.grant.as_mut().ok_or("unauthorized")?;
+        grant.display = (next.width, next.height);
+        let media_password = hex::encode(hmac(
+            &grant.key,
+            &format!("monitor-media|{}|{revision}", command.seq),
+        ));
+        inner.selected_display = Some((next, revision));
+        Ok(MonitorResult {
+            display_revision: revision,
+            monitor_index: index,
+            monitor_count: displays.len(),
+            media_password,
+        })
+    }
+
+    pub fn active_display(&self) -> Option<(String, Display, u64)> {
+        let inner = self.0.lock().ok()?;
+        let grant = inner
+            .grant
+            .as_ref()
+            .filter(|grant| Instant::now() < grant.expires)?;
+        let (display, revision) = inner.selected_display?;
+        Some((grant.peer.clone(), display, revision))
     }
 
     pub fn write_clipboard(&self, command: ClipboardCommand) -> Result<(), String> {
@@ -553,6 +1080,10 @@ impl Authority {
         inner.grant.as_ref().map(|grant| grant.peer.clone())
     }
 
+    pub fn has_trusted_pc(&self) -> bool {
+        self.0.lock().is_ok_and(|inner| inner.trusted.is_some())
+    }
+
     pub fn disconnect(&self, peer: &str) {
         if let Ok(mut inner) = self.0.lock() {
             if inner.grant.as_ref().is_some_and(|grant| grant.peer == peer) {
@@ -574,18 +1105,20 @@ impl Authority {
         inner.available = false;
         Self::clear_invite(&mut inner);
         Self::revoke(&mut inner);
+        let trust_file = trust_path(data_dir, false);
+        if trust_file.exists() {
+            fs::remove_file(trust_file).map_err(|_| "secret_store_failed")?;
+        }
+        inner.trusted = None;
         let fresh = rand::random::<[u8; 32]>();
-        let encrypted =
-            encrypt_data(&fresh, Scope::User, None).map_err(|_| "secret_store_failed")?;
-        let temp = data_dir.join(format!("access-secret-{}.dpapi", random_hex()));
-        let path = data_dir.join("access-secret.dpapi");
+        let encoded = encode_secret(&fresh)?;
+        let temp = data_dir.join(format!("access-secret-{}.tmp", random_hex()));
+        let path = secret_path(data_dir);
         let result = (|| -> Result<(), String> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
+            let mut file = secret_file()
                 .open(&temp)
                 .map_err(|_| "secret_store_failed")?;
-            file.write_all(&encrypted)
+            file.write_all(&encoded)
                 .map_err(|_| "secret_store_failed")?;
             file.sync_all().map_err(|_| "secret_store_failed")?;
             drop(file);
@@ -605,6 +1138,7 @@ impl Authority {
         }
         inner.left_down = false;
         inner.grant = None;
+        inner.selected_display = None;
         inner.pending = None;
         inner.mouse = None;
         inner.last_clipboard = None;
@@ -635,20 +1169,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn monitor_actions_require_authentication_and_current_display_revision() {
+        let authority = Authority::from_secret([7; 32]);
+        let command = || MonitorCommand {
+            peer: "browser_1".into(),
+            seq: 1,
+            display_revision: 0,
+            mac: "0".repeat(64),
+        };
+        assert_eq!(
+            authority.next_monitor(command()).err().unwrap(),
+            "unauthorized"
+        );
+        let key = [9; 32];
+        let generation = authority.bootstrap().unwrap().generation;
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "browser_1".into(),
+                key,
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+            inner.selected_display = Some((
+                Display {
+                    id: 1,
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    primary: true,
+                },
+                1,
+            ));
+        }
+        assert_eq!(
+            authority.next_monitor(command()).err().unwrap(),
+            "invalid_mac"
+        );
+        let mut signed = command();
+        signed.mac = hex::encode(hmac(&key, &format!("monitor|{generation}|browser_1|1|0")));
+        assert_eq!(
+            authority.next_monitor(signed).err().unwrap(),
+            "display_changed"
+        );
+        let mouse = MouseCommand {
+            peer: "browser_1".into(),
+            seq: 2,
+            op: 1,
+            x: 0,
+            y: 0,
+            arg: 0,
+            display_revision: Some(0),
+            mac: hex::encode(hmac(
+                &key,
+                &format!("mouse|{generation}|browser_1|2|1|0|0|0|0"),
+            )),
+        };
+        assert_eq!(authority.mouse(mouse).err().unwrap(), "display_changed");
+        let mut replay = command();
+        replay.mac = hex::encode(hmac(&key, &format!("monitor|{generation}|browser_1|1|0")));
+        assert_eq!(
+            authority.next_monitor(replay).err().unwrap(),
+            "stale_command"
+        );
+        authority.disconnect("browser_1");
+        assert!(authority.active_display().is_none());
+    }
+
+    #[test]
     fn rejects_bad_peer_and_proof() {
         assert!(!valid_peer("../../x"));
         assert!(valid_peer("browser_1"));
         let authority = Authority::from_secret([7; 32]);
         assert!(authority
-            .begin_auth("../../x".into(), "0".repeat(64), "1".repeat(64), None)
+            .begin_auth("../../x".into(), "0".repeat(64), "1".repeat(64), None, None)
             .is_err());
         let challenge = authority
-            .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64), None)
+            .begin_auth(
+                "browser_1".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(challenge.host_cert, "0".repeat(64));
         assert_eq!(challenge.client_cert, "1".repeat(64));
         assert!(authority
-            .finish_auth("browser_1".into(), "2".repeat(32), "3".repeat(64), None)
+            .finish_auth(
+                "browser_1".into(),
+                "2".repeat(32),
+                "3".repeat(64),
+                None,
+                None
+            )
             .is_err());
     }
 
@@ -663,6 +1281,7 @@ mod tests {
             seq: 0,
             expires: Instant::now() + ACCESS_LINK_LIFETIME,
             invite_id: None,
+            trusted_id: None,
             display: (1920, 1080),
         });
         let message = "mouse|generation|browser_1|1|1|1|1|0";
@@ -682,14 +1301,20 @@ mod tests {
         first.replace_password(&dir).unwrap();
         assert_eq!(
             first
-                .begin_auth("browser_1".into(), "0".repeat(64), "1".repeat(64), None)
+                .begin_auth(
+                    "browser_1".into(),
+                    "0".repeat(64),
+                    "1".repeat(64),
+                    None,
+                    None
+                )
                 .err()
                 .unwrap(),
             "unavailable"
         );
         let restarted = Authority::load(&dir).unwrap();
         assert_ne!(restarted.bootstrap().unwrap().password, old_password);
-        fs::remove_file(dir.join("access-secret.dpapi")).unwrap();
+        fs::remove_file(secret_path(&dir)).unwrap();
         fs::remove_dir(dir).unwrap();
     }
 
@@ -707,6 +1332,7 @@ mod tests {
                 "0".repeat(64),
                 "1".repeat(64),
                 Some(first.id.clone()),
+                None,
             )
             .unwrap();
         let inner = authority.0.lock().unwrap();
@@ -724,7 +1350,8 @@ mod tests {
                 "browser_1".into(),
                 "2".repeat(32),
                 "3".repeat(64),
-                Some(first.id)
+                Some(first.id),
+                None,
             )
             .is_err());
         authority.revoke_access_link(&second.id);
@@ -734,7 +1361,8 @@ mod tests {
                 "browser_1".into(),
                 "0".repeat(64),
                 "1".repeat(64),
-                Some(second.id)
+                Some(second.id),
+                None,
             )
             .is_err());
 
@@ -756,6 +1384,7 @@ mod tests {
                 seq: 0,
                 expires: Instant::now() + ACCESS_LINK_LIFETIME,
                 invite_id: Some(link.id.clone()),
+                trusted_id: None,
                 display: (1920, 1080),
             });
         }
@@ -769,6 +1398,7 @@ mod tests {
             seq: 0,
             expires: Instant::now() + ACCESS_LINK_LIFETIME,
             invite_id: None,
+            trusted_id: None,
             display: (1920, 1080),
         });
         authority.revoke_access_link(&another.id);
@@ -786,6 +1416,7 @@ mod tests {
             seq: 0,
             expires: Instant::now() - Duration::from_secs(1),
             invite_id: None,
+            trusted_id: None,
             display: (1920, 1080),
         });
         let message = "mouse|generation|browser_1|1|1|1|1|0";
@@ -795,5 +1426,159 @@ mod tests {
             "unauthorized"
         );
         assert!(inner.grant.is_none());
+    }
+
+    #[test]
+    fn saved_pc_migration_concurrent_updates_and_scoped_forget() {
+        let dir = std::env::temp_dir().join(format!("ninja-saved-pcs-{}", random_hex()));
+        fs::create_dir_all(&dir).unwrap();
+        let first = ControllerTrust {
+            id: "a".repeat(32),
+            secret: "b".repeat(64),
+            host_id: "c".repeat(32),
+        };
+        write_protected(
+            &trust_path(&dir, true),
+            &serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_controller_trust(&dir).unwrap().unwrap().host_id,
+            first.host_id
+        );
+        assert!(!trust_path(&dir, true).exists());
+        let second = ControllerTrust {
+            id: "d".repeat(32),
+            secret: "e".repeat(64),
+            host_id: "f".repeat(32),
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..10 {
+                    save_controller_trust(&dir, &first).unwrap();
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..10 {
+                    save_controller_trust(&dir, &second).unwrap();
+                }
+            });
+        });
+        assert_eq!(list_saved_computers(&dir).unwrap().len(), 2);
+        rename_saved_computer(&dir, &second.host_id, &"界".repeat(80)).unwrap();
+        assert!(rename_saved_computer(&dir, &second.host_id, &"界".repeat(81)).is_err());
+        forget_controller_trust_for(&dir, &first.host_id).unwrap();
+        assert!(touch_saved_computer(&dir, &first.host_id, &first.id).is_err());
+        assert!(load_controller_trust_for(&dir, Some(&second.host_id))
+            .unwrap()
+            .is_some());
+        forget_controller_trust_for(&dir, &second.host_id).unwrap();
+        // An old migration source left behind by a failed deletion cannot revive trust.
+        write_protected(
+            &trust_path(&dir, true),
+            &serde_json::to_vec(&first).unwrap(),
+        )
+        .unwrap();
+        assert!(load_controller_trust(&dir).unwrap().is_none());
+        fs::remove_file(trust_path(&dir, true)).unwrap();
+        fs::remove_file(saved_computers_path(&dir)).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn trusted_desktop_survives_restart_and_revokes() {
+        let dir = std::env::temp_dir().join(format!("ninja-trust-test-{}", random_hex()));
+        let authority = Authority::load(&dir).unwrap();
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "desktop_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+        }
+        let grant = authority.approve_trusted_pc("desktop_1").unwrap();
+        assert_eq!(grant.mac.len(), 64);
+        let controller = ControllerTrust {
+            id: grant.id.clone(),
+            secret: grant.secret.clone(),
+            host_id: grant.host_id.clone(),
+        };
+        save_controller_trust(&dir, &controller).unwrap();
+        assert_eq!(
+            load_controller_trust(&dir).unwrap().unwrap().secret,
+            grant.secret
+        );
+        authority.disconnect("desktop_1");
+        let restarted = Authority::load(&dir).unwrap();
+        assert_eq!(restarted.bootstrap().unwrap().trusted.unwrap().id, grant.id);
+        assert!(restarted
+            .begin_auth(
+                "desktop_2".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                None,
+                Some(grant.id.clone())
+            )
+            .is_ok());
+        restarted.revoke_trusted_pc().unwrap();
+        assert!(restarted
+            .begin_auth(
+                "desktop_2".into(),
+                "0".repeat(64),
+                "1".repeat(64),
+                None,
+                Some(grant.id)
+            )
+            .is_err());
+        forget_controller_trust(&dir).unwrap();
+        assert!(load_controller_trust(&dir).unwrap().is_none());
+        fs::remove_file(saved_computers_path(&dir)).unwrap();
+        fs::remove_file(secret_path(&dir)).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn trusted_approval_rejects_expired_grant_and_revoke_closes_password_session() {
+        let dir = std::env::temp_dir().join(format!("ninja-trust-expiry-{}", random_hex()));
+        let authority = Authority::load(&dir).unwrap();
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "desktop_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() - Duration::from_secs(1),
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+        }
+        assert_eq!(
+            authority.approve_trusted_pc("desktop_1").err().unwrap(),
+            "unauthorized"
+        );
+        {
+            let mut inner = authority.0.lock().unwrap();
+            inner.grant = Some(Grant {
+                peer: "desktop_1".into(),
+                key: [9; 32],
+                seq: 0,
+                expires: Instant::now() + ACCESS_LINK_LIFETIME,
+                invite_id: None,
+                trusted_id: None,
+                display: (1920, 1080),
+            });
+        }
+        authority.approve_trusted_pc("desktop_1").unwrap();
+        authority.revoke_trusted_pc().unwrap();
+        assert!(authority.active_peer().is_none());
+        assert!(authority.bootstrap().unwrap().trusted.is_none());
+        fs::remove_file(secret_path(&dir)).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 }

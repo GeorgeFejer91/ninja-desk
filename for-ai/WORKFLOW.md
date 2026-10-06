@@ -11,6 +11,11 @@
    context.
 7. Update project memory and publish only when the rules below apply.
 
+For work involving more than one PC, also read `MULTI_COMPUTER.md` before
+editing or synchronizing. Assign one integration owner and exchange the exact
+source SHA and machine receipts; a branch name or app version is insufficient.
+Read `AVAILABILITY.md` before configuring unattended host startup or recovery.
+
 ## Control-plane update triggers
 
 Update the narrowest canonical file in the same change when any durable fact

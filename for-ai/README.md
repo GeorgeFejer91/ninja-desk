@@ -28,6 +28,8 @@ the easiest interpretation.
 | Which installed skills apply and in what order | [`SKILLS.md`](./SKILLS.md) |
 | Acceptance criteria, commands, gates, evidence limits | [`VERIFICATION.md`](./VERIFICATION.md) |
 | Session loop, updates, Git publication, handoff | [`WORKFLOW.md`](./WORKFLOW.md) |
+| Work across PCs, shared commits, machine receipts | [`MULTI_COMPUTER.md`](./MULTI_COMPUTER.md) |
+| Persistent Windows availability and recovery qualification | [`AVAILABILITY.md`](./AVAILABILITY.md) |
 | Why a durable choice was made or superseded | [`DECISIONS.md`](./DECISIONS.md) |
 
 Do not read every file by default. Read this router, then only what the current
