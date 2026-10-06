@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Host', 'Controller')][string]$Role = 'Controller',
-    [string]$ProjectRoot = (Join-Path $PSScriptRoot '../..'),
+    [string]$ProjectRoot,
     [string]$GitHubRoot = (Join-Path $env:USERPROFILE 'Documents/GitHub'),
     [ValidatePattern('^[0-9a-fA-F]{40}$')][string]$ExpectedSourceSha,
     [ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedGuiHash,
@@ -32,6 +32,7 @@ function Read-Git([string[]]$GitArguments) {
 
 try {
     if ($env:OS -ne 'Windows_NT') { throw 'This receipt requires Windows.' }
+    if (-not $ProjectRoot) { $ProjectRoot = Join-Path $PSScriptRoot '../..' }
     $root = (Resolve-Path -LiteralPath $ProjectRoot).Path.TrimEnd('\', '/')
     $central = [IO.Path]::GetFullPath((Join-Path $GitHubRoot 'ninja-desk')).TrimEnd('\', '/')
     if (-not $root.Equals($central, [StringComparison]::OrdinalIgnoreCase)) {
